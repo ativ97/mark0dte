@@ -1,0 +1,6 @@
+fastapi
+uvicorn
+pandas
+yfinance
+pydantic
+https://github.com/xgboosted/pandas-ta-classic/archive/refs/heads/main.zip
