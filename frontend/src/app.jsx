@@ -7,6 +7,8 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
 
   const [newPosition, setNewPosition] = useState({ type: 'Put Spread', strike: '', credit: '' });
+  const [tradeAnalysis, setTradeAnalysis] = useState(null);
+  const [analyzingTrade, setAnalyzingTrade] = useState(false);
 
   const fetchTelemetry = async () => {
     try {
@@ -68,6 +70,31 @@ export default function App() {
       fetchTelemetry();
     } catch (err) {
       console.error("Failed to delete position", err);
+    }
+  };
+
+  const analyzeTrade = async () => {
+    if (!newPosition.strike || !newPosition.credit) return;
+    setAnalyzingTrade(true);
+    setTradeAnalysis(null);
+    try {
+      const response = await fetch('http://127.0.0.1:8000/api/analyze-trade', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          type: newPosition.type,
+          strike: parseFloat(newPosition.strike),
+          credit: parseFloat(newPosition.credit),
+        }),
+      });
+      if (!response.ok) throw new Error('Analysis failed');
+      const data = await response.json();
+      setTradeAnalysis(data);
+    } catch (err) {
+      console.error('Trade analysis failed', err);
+      setTradeAnalysis({ error: 'Failed to analyze trade. Is the server running?' });
+    } finally {
+      setAnalyzingTrade(false);
     }
   };
 
@@ -476,16 +503,121 @@ export default function App() {
               );
             })()}
 
-            <form onSubmit={handleAddPosition} className="mb-6 space-y-3">
-              <select className="w-full bg-slate-900 border border-slate-600 rounded p-2 text-slate-200 outline-none" value={newPosition.type} onChange={e => setNewPosition({...newPosition, type: e.target.value})}>
-                <option>Put Spread</option><option>Call Spread</option><option>Iron Condor</option>
+            <form onSubmit={handleAddPosition} className="mb-4 space-y-3">
+              <select className="w-full bg-slate-900 border border-slate-600 rounded p-2 text-slate-200 outline-none" value={newPosition.type} onChange={e => { setNewPosition({...newPosition, type: e.target.value}); setTradeAnalysis(null); }}>
+                <option>Put Spread</option><option>Call Spread</option>
               </select>
               <div className="flex gap-2">
-                <input type="text" placeholder="SPX Strike" className="w-1/2 bg-slate-900 border border-slate-600 rounded p-2 text-slate-200 outline-none" value={newPosition.strike} onChange={e => setNewPosition({...newPosition, strike: e.target.value})}/>
-                <input type="text" placeholder="Credit ($)" className="w-1/2 bg-slate-900 border border-slate-600 rounded p-2 text-slate-200 outline-none" value={newPosition.credit} onChange={e => setNewPosition({...newPosition, credit: e.target.value})}/>
+                <input type="text" placeholder="SPX Strike" className="w-1/2 bg-slate-900 border border-slate-600 rounded p-2 text-slate-200 outline-none" value={newPosition.strike} onChange={e => { setNewPosition({...newPosition, strike: e.target.value}); setTradeAnalysis(null); }}/>
+                <input type="text" placeholder="Credit ($)" className="w-1/2 bg-slate-900 border border-slate-600 rounded p-2 text-slate-200 outline-none" value={newPosition.credit} onChange={e => { setNewPosition({...newPosition, credit: e.target.value}); setTradeAnalysis(null); }}/>
               </div>
-              <button type="submit" className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2 px-4 rounded">Track Position</button>
+              <div className="flex gap-2">
+                <button type="button" onClick={analyzeTrade} disabled={analyzingTrade || !newPosition.strike || !newPosition.credit} className="w-1/2 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 disabled:text-slate-500 text-white font-bold py-2 px-4 rounded transition-colors">
+                  {analyzingTrade ? 'Analyzing...' : 'Analyze First'}
+                </button>
+                <button type="submit" className="w-1/2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2 px-4 rounded">Track Position</button>
+              </div>
             </form>
+
+            {/* Pre-Trade Analysis Result */}
+            {tradeAnalysis && !tradeAnalysis.error && (
+              <div className={`mb-4 rounded-lg border p-4 ${
+                tradeAnalysis.verdict_color === 'emerald' ? 'border-emerald-500 bg-emerald-500/10' :
+                tradeAnalysis.verdict_color === 'blue' ? 'border-blue-500 bg-blue-500/10' :
+                tradeAnalysis.verdict_color === 'amber' ? 'border-amber-500 bg-amber-500/10' :
+                'border-red-500 bg-red-500/10'
+              }`}>
+                <div className="flex items-center justify-between mb-3">
+                  <span className={`text-lg font-bold ${
+                    tradeAnalysis.verdict_color === 'emerald' ? 'text-emerald-400' :
+                    tradeAnalysis.verdict_color === 'blue' ? 'text-blue-400' :
+                    tradeAnalysis.verdict_color === 'amber' ? 'text-amber-400' :
+                    'text-red-400'
+                  }`}>{tradeAnalysis.verdict_label}</span>
+                  <span className="text-2xl font-mono font-bold text-white">{tradeAnalysis.score}<span className="text-sm text-slate-400">/100</span></span>
+                </div>
+
+                {/* Score breakdown bar */}
+                <div className="flex gap-1 mb-3 h-2 rounded overflow-hidden bg-slate-800">
+                  {(() => {
+                    const b = tradeAnalysis.breakdown;
+                    const max = 100;
+                    const segments = [
+                      { val: b.moat_score, color: 'bg-emerald-500', label: 'Moat' },
+                      { val: b.range_score, color: 'bg-blue-500', label: 'Range' },
+                      { val: b.direction_score, color: 'bg-cyan-500', label: 'Direction' },
+                      { val: b.time_score, color: 'bg-purple-500', label: 'Time' },
+                      { val: b.credit_score, color: 'bg-amber-500', label: 'Credit' },
+                      { val: b.portfolio_score, color: 'bg-teal-500', label: 'Portfolio' },
+                    ];
+                    return segments.map((s, i) => (
+                      <div key={i} className={`${s.color} transition-all`} style={{ width: `${(s.val / max) * 100}%` }} title={`${s.label}: ${s.val}`} />
+                    ));
+                  })()}
+                </div>
+
+                {/* Breakdown detail */}
+                <div className="grid grid-cols-3 gap-1 text-xs mb-3">
+                  {[
+                    ['Moat', tradeAnalysis.breakdown.moat_score, 30],
+                    ['Range', tradeAnalysis.breakdown.range_score, 20],
+                    ['Direction', tradeAnalysis.breakdown.direction_score, 15],
+                    ['Time', tradeAnalysis.breakdown.time_score, 15],
+                    ['Credit', tradeAnalysis.breakdown.credit_score, 10],
+                    ['Portfolio', tradeAnalysis.breakdown.portfolio_score, 10],
+                  ].map(([label, val, max]) => (
+                    <div key={label} className="text-center">
+                      <span className="text-slate-400">{label}</span>
+                      <span className={`ml-1 font-mono ${val >= max * 0.7 ? 'text-emerald-400' : val >= max * 0.4 ? 'text-amber-400' : 'text-red-400'}`}>{val}/{max}</span>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Penalties */}
+                {(tradeAnalysis.breakdown.regime_penalty > 0 || tradeAnalysis.breakdown.range_stress_penalty > 0) && (
+                  <div className="text-xs text-red-400 mb-2">
+                    Penalties: {tradeAnalysis.breakdown.regime_penalty > 0 && <span className="mr-2">Regime −{tradeAnalysis.breakdown.regime_penalty}</span>}
+                    {tradeAnalysis.breakdown.range_stress_penalty > 0 && <span>Range stress −{tradeAnalysis.breakdown.range_stress_penalty}</span>}
+                  </div>
+                )}
+
+                {/* Moat info */}
+                <div className="text-xs text-slate-300 mb-2">
+                  Proposed moat: <span className="font-mono font-bold">{tradeAnalysis.moat} pts</span> (smart moat: {tradeAnalysis.context.smart_moat} pts)
+                </div>
+
+                {/* Reasons */}
+                {tradeAnalysis.reasons_for.length > 0 && (
+                  <div className="mb-2">
+                    {tradeAnalysis.reasons_for.map((r, i) => (
+                      <div key={i} className="text-xs text-emerald-400 flex items-start gap-1"><span>+</span><span>{r}</span></div>
+                    ))}
+                  </div>
+                )}
+                {tradeAnalysis.reasons_against.length > 0 && (
+                  <div className="mb-2">
+                    {tradeAnalysis.reasons_against.map((r, i) => (
+                      <div key={i} className="text-xs text-red-400 flex items-start gap-1"><span>-</span><span>{r}</span></div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Suggested alternative */}
+                {tradeAnalysis.suggested_strike && (
+                  <div className="text-xs text-blue-400 mt-2 pt-2 border-t border-slate-700">
+                    Suggested: {newPosition.type} @ <span className="font-mono font-bold">{tradeAnalysis.suggested_strike}</span> for better score
+                    <button
+                      onClick={() => { setNewPosition({...newPosition, strike: String(tradeAnalysis.suggested_strike)}); setTradeAnalysis(null); }}
+                      className="ml-2 px-2 py-0.5 bg-blue-600 hover:bg-blue-500 rounded text-white text-xs"
+                    >Use</button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {tradeAnalysis?.error && (
+              <div className="mb-4 p-3 rounded bg-red-500/10 border border-red-500 text-red-400 text-xs">{tradeAnalysis.error}</div>
+            )}
 
             <div className="space-y-4 overflow-y-auto flex-1">
               {activePositions.length === 0 ? (

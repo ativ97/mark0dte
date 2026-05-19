@@ -1123,3 +1123,233 @@ def compute_position_summary(evaluated_positions: list, spx_price: float,
         "positions_at_risk": put_at_risk + call_at_risk,
         "positions_total": len(evaluated_positions),
     }
+
+
+# ================================================================
+# PHASE 5: PRE-TRADE ANALYSIS
+# ================================================================
+def analyze_trade_proposal(
+    trade_type: str,
+    strike: float,
+    credit: float,
+    spx_price: float,
+    regime_data: dict,
+    smart_moat: int,
+    day_high_spx: float,
+    day_low_spx: float,
+    range_position: float,
+    existing_positions: list,
+    momentum_label: str = "",
+    vwap_dev: float = 0.0,
+) -> dict:
+    """
+    Scores a proposed credit spread BEFORE entry.
+    Returns a verdict (STRONG_ENTRY / ACCEPTABLE / CAUTION / REJECT),
+    a 0-100 score, and detailed reasons for/against.
+    """
+    hours_remaining = regime_data["time_pressure"]["hours_remaining"]
+    directional_bias = regime_data["directional_bias"]
+    regime_score = regime_data["regime_score"]
+    day_range = day_high_spx - day_low_spx
+
+    # Moat of proposed trade
+    if trade_type == "Put Spread":
+        moat = spx_price - strike
+    else:
+        moat = strike - spx_price
+
+    moat = round(moat, 1)
+    reasons_for = []
+    reasons_against = []
+
+    # ---- 1. MOAT ADEQUACY (0-30 pts) ----
+    if moat >= smart_moat * 1.5:
+        moat_score = 30
+        reasons_for.append(f"Excellent buffer: {moat} pts moat (×1.5 above {smart_moat} smart moat)")
+    elif moat >= smart_moat:
+        moat_score = 22
+        reasons_for.append(f"Adequate buffer: {moat} pts moat (meets {smart_moat} smart moat)")
+    elif moat >= WARNING_ZONE_THRESHOLD:
+        moat_score = 10
+        reasons_against.append(f"Marginal buffer: {moat} pts moat (below {smart_moat} smart moat)")
+    elif moat >= GAMMA_TRAP_THRESHOLD:
+        moat_score = 3
+        reasons_against.append(f"Dangerously close: {moat} pts moat (WARNING zone)")
+    else:
+        moat_score = 0
+        reasons_against.append(f"Unacceptable: {moat} pts moat (GAMMA TRAP zone)")
+
+    # ---- 2. DAY RANGE SAFETY (0-20 pts) ----
+    if trade_type == "Call Spread":
+        day_extreme_gap = strike - day_high_spx
+        extreme_label = f"Day high ({day_high_spx:.0f})"
+    else:
+        day_extreme_gap = day_low_spx - strike
+        extreme_label = f"Day low ({day_low_spx:.0f})"
+
+    day_extreme_gap = round(day_extreme_gap, 1)
+
+    if day_extreme_gap < 0:
+        range_score = 0
+        reasons_against.append(f"{extreme_label} already exceeded this strike by {abs(day_extreme_gap)} pts. Market has proven it can reach here.")
+    elif day_extreme_gap < 15:
+        range_score = 5
+        reasons_against.append(f"{extreme_label} came within {day_extreme_gap} pts of strike. Tight.")
+    elif day_extreme_gap < 30:
+        range_score = 12
+        reasons_for.append(f"{extreme_label} is {day_extreme_gap} pts away. Moderate day-range buffer.")
+    else:
+        range_score = 20
+        reasons_for.append(f"{extreme_label} is {day_extreme_gap} pts away. Strong day-range buffer.")
+
+    # ---- 3. DIRECTIONAL ALIGNMENT (0-15 pts) ----
+    at_risk_side = False
+    if trade_type == "Put Spread" and directional_bias in ("BEARISH", "LEAN BEARISH"):
+        at_risk_side = True
+    elif trade_type == "Call Spread" and directional_bias in ("BULLISH", "LEAN BULLISH"):
+        at_risk_side = True
+
+    if directional_bias == "NEUTRAL":
+        direction_score = 10
+        reasons_for.append("Neutral bias — no directional headwind.")
+    elif at_risk_side:
+        direction_score = 0
+        reasons_against.append(f"Against the trend: {directional_bias} bias threatens {trade_type.split()[0].lower()} side.")
+    else:
+        direction_score = 15
+        reasons_for.append(f"With the trend: {directional_bias} bias favors this side.")
+
+    # ---- 4. TIME WINDOW (0-15 pts) ----
+    if hours_remaining >= 4:
+        time_score = 15
+        reasons_for.append(f"{hours_remaining:.1f}h remaining — full theta runway.")
+    elif hours_remaining >= 2.5:
+        time_score = 10
+        reasons_for.append(f"{hours_remaining:.1f}h remaining — adequate theta window.")
+    elif hours_remaining >= 1.5:
+        time_score = 4
+        reasons_against.append(f"{hours_remaining:.1f}h remaining — late entry, gamma accelerating.")
+    else:
+        time_score = 0
+        reasons_against.append(f"{hours_remaining:.1f}h remaining — GAMMA RAMP. Do NOT enter new positions.")
+
+    # ---- 5. CREDIT QUALITY (0-10 pts) ----
+    if credit >= 1.0:
+        credit_score = 10
+        reasons_for.append(f"${credit:.2f} credit — strong premium collected.")
+    elif credit >= 0.50:
+        credit_score = 7
+        reasons_for.append(f"${credit:.2f} credit — decent premium.")
+    elif credit >= 0.30:
+        credit_score = 4
+        reasons_against.append(f"${credit:.2f} credit — thin premium for the risk.")
+    else:
+        credit_score = 1
+        reasons_against.append(f"${credit:.2f} credit — very thin. Risk/reward unfavorable.")
+
+    # ---- 6. PORTFOLIO IMPACT (0-10 pts) ----
+    existing_puts = [p for p in existing_positions if p.get("type") == "Put Spread"]
+    existing_calls = [p for p in existing_positions if p.get("type") == "Call Spread"]
+
+    if not existing_positions:
+        portfolio_score = 5
+        portfolio_note = "First position — no portfolio context."
+    else:
+        put_heavy = len(existing_puts) > len(existing_calls)
+        call_heavy = len(existing_calls) > len(existing_puts)
+
+        if (trade_type == "Put Spread" and call_heavy) or (trade_type == "Call Spread" and put_heavy):
+            portfolio_score = 10
+            portfolio_note = "Balances portfolio — improves iron condor structure."
+            reasons_for.append(portfolio_note)
+        elif (trade_type == "Put Spread" and put_heavy) or (trade_type == "Call Spread" and call_heavy):
+            portfolio_score = 2
+            portfolio_note = "Adds to already-heavy side — increases directional exposure."
+            reasons_against.append(portfolio_note)
+        else:
+            portfolio_score = 6
+            portfolio_note = "Maintains balanced structure."
+
+    # ---- 7. REGIME PENALTY ----
+    # State C whipsaw is dangerous for new entries
+    regime_penalty = 0
+    if regime_score >= 3:
+        regime_penalty = 10
+        reasons_against.append("State C whipsaw — high reversal risk for new entries.")
+    elif regime_score == 2:
+        regime_penalty = 5
+        reasons_against.append("State B moderate chop — some reversal risk.")
+
+    # ---- 8. RANGE POSITION STRESS ----
+    # Entering a call spread when SPX is at 90%+ of day range is risky
+    range_stress_penalty = 0
+    if trade_type == "Call Spread" and range_position > 80:
+        range_stress_penalty = min(8, round((range_position - 80) / 20 * 8))
+        reasons_against.append(f"SPX at {range_position:.0f}% of day range — elevated call premium risk.")
+    elif trade_type == "Put Spread" and range_position < 20:
+        range_stress_penalty = min(8, round((20 - range_position) / 20 * 8))
+        reasons_against.append(f"SPX at {range_position:.0f}% of day range — elevated put premium risk.")
+
+    # ---- TOTAL SCORE ----
+    raw_score = moat_score + range_score + direction_score + time_score + credit_score + portfolio_score
+    total_score = max(0, min(100, raw_score - regime_penalty - range_stress_penalty))
+
+    # ---- VERDICT ----
+    if total_score >= 75:
+        verdict = "STRONG_ENTRY"
+        verdict_label = "Strong Entry"
+        verdict_color = "emerald"
+    elif total_score >= 55:
+        verdict = "ACCEPTABLE"
+        verdict_label = "Acceptable"
+        verdict_color = "blue"
+    elif total_score >= 35:
+        verdict = "CAUTION"
+        verdict_label = "Caution — Consider Alternatives"
+        verdict_color = "amber"
+    else:
+        verdict = "REJECT"
+        verdict_label = "Reject — Do Not Enter"
+        verdict_color = "red"
+
+    # ---- SUGGESTED ALTERNATIVE ----
+    suggested_strike = None
+    if total_score < 75:
+        ideal_moat = round(smart_moat * 1.3)
+        if trade_type == "Call Spread":
+            suggested_strike = round(spx_price + ideal_moat)
+            # Must be above day high
+            suggested_strike = max(suggested_strike, round(day_high_spx + 10))
+        else:
+            suggested_strike = round(spx_price - ideal_moat)
+            # Must be below day low
+            suggested_strike = min(suggested_strike, round(day_low_spx - 10))
+
+    return {
+        "verdict": verdict,
+        "verdict_label": verdict_label,
+        "verdict_color": verdict_color,
+        "score": total_score,
+        "moat": moat,
+        "breakdown": {
+            "moat_score": moat_score,
+            "range_score": range_score,
+            "direction_score": direction_score,
+            "time_score": time_score,
+            "credit_score": credit_score,
+            "portfolio_score": portfolio_score,
+            "regime_penalty": regime_penalty,
+            "range_stress_penalty": range_stress_penalty,
+        },
+        "reasons_for": reasons_for,
+        "reasons_against": reasons_against,
+        "suggested_strike": suggested_strike,
+        "context": {
+            "smart_moat": smart_moat,
+            "regime_state": regime_data["regime_state"],
+            "directional_bias": directional_bias,
+            "hours_remaining": hours_remaining,
+            "day_range": round(day_range, 1),
+            "range_position": range_position,
+        },
+    }

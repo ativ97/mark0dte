@@ -13,7 +13,7 @@ logger = logging.getLogger("0DTE-QuantEngine")
 
 # Import refactored modules
 from data_fetcher import fetch_alpaca_market_data, fetch_spx_live_price
-from engine import analyze_market_regime, evaluate_positions, generate_recommendations, compute_watch_levels, compute_position_summary, compute_smart_moat
+from engine import analyze_market_regime, evaluate_positions, generate_recommendations, compute_watch_levels, compute_position_summary, compute_smart_moat, analyze_trade_proposal
 from database import Base, engine as db_engine, get_db, PositionDB, ClosedPositionDB
 
 # Initialize Database tables
@@ -328,6 +328,93 @@ def get_telemetry(db: Session = Depends(get_db)):
         watch_levels=watch_levels,
         position_summary=position_summary,
     )
+
+
+class TradeProposal(BaseModel):
+    type: Literal["Put Spread", "Call Spread"]
+    strike: float
+    credit: float
+
+    @field_validator("strike")
+    @classmethod
+    def strike_positive(cls, v):
+        if v <= 0:
+            raise ValueError("Strike must be a positive number")
+        return v
+
+    @field_validator("credit")
+    @classmethod
+    def credit_positive(cls, v):
+        if v <= 0:
+            raise ValueError("Credit must be a positive number")
+        return v
+
+
+@app.post("/api/analyze-trade")
+def analyze_trade(proposal: TradeProposal, db: Session = Depends(get_db)):
+    """
+    Phase 5: Pre-trade analysis. Scores a proposed credit spread
+    against current market conditions before entry.
+    """
+    logger.info(f"Analyzing trade proposal: {proposal.type} @ {proposal.strike} for ${proposal.credit}")
+
+    # Fetch fresh market data (same pipeline as telemetry)
+    df, live_price = fetch_alpaca_market_data("SPY")
+    if df is None or df.empty:
+        raise HTTPException(status_code=503, detail="Failed to fetch market data.")
+
+    try:
+        df.ta.ema(length=9, append=True)
+        df.ta.ema(length=21, append=True)
+        df.ta.rsi(length=14, append=True)
+        df.ta.chop(length=14, append=True)
+        df.ta.er(length=10, append=True)
+        df.ta.vwap(append=True)
+        df.dropna(inplace=True)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error calculating indicators: {str(e)}")
+
+    regime_data = analyze_market_regime(df)
+
+    spx_price, spx_source = fetch_spx_live_price(spy_fallback_price=live_price)
+    if spx_price is None:
+        raise HTTPException(status_code=503, detail="Unable to determine SPX price.")
+
+    momentum_data = regime_data["momentum"]
+    spx_spy_ratio = spx_price / live_price if live_price > 0 else 10.0
+    day_high_spx = round(momentum_data["day_high_spy"] * spx_spy_ratio, 2)
+    day_low_spx = round(momentum_data["day_low_spy"] * spx_spy_ratio, 2)
+    range_position = momentum_data["range_position"]
+
+    smart_moat_data = compute_smart_moat(
+        regime_data, spx_price, day_high_spx, day_low_spx, range_position,
+    )
+    smart_moat = smart_moat_data["smart_moat"]
+
+    # Get existing positions for portfolio impact analysis
+    db_positions = db.query(PositionDB).all()
+    existing_positions = [
+        {"type": p.type, "strike": p.strike, "credit": p.credit}
+        for p in db_positions
+    ]
+
+    result = analyze_trade_proposal(
+        trade_type=proposal.type,
+        strike=proposal.strike,
+        credit=proposal.credit,
+        spx_price=spx_price,
+        regime_data=regime_data,
+        smart_moat=smart_moat,
+        day_high_spx=day_high_spx,
+        day_low_spx=day_low_spx,
+        range_position=range_position,
+        existing_positions=existing_positions,
+        momentum_label=momentum_data.get("momentum_label", ""),
+        vwap_dev=regime_data.get("vwap_dev", 0.0),
+    )
+
+    logger.info(f"Trade analysis: {result['verdict']} (score {result['score']})")
+    return result
 
 
 if __name__ == "__main__":
