@@ -3,4 +3,5 @@ uvicorn
 pandas
 yfinance
 pydantic
+requests
 https://github.com/xgboosted/pandas-ta-classic/archive/refs/heads/main.zip
