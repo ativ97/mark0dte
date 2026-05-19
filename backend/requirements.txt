@@ -4,4 +4,6 @@ pandas
 yfinance
 pydantic
 requests
+sqlalchemy
+python-dotenv
 https://github.com/xgboosted/pandas-ta-classic/archive/refs/heads/main.zip

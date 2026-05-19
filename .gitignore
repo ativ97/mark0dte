@@ -1,0 +1,21 @@
+# Environment secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# SQLite databases
+*.db
+
+# Logs
+backend/logs/
+
+# IDE
+.idea/
+.vscode/
+
+# Node
+node_modules/
+dist/

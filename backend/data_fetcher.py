@@ -1,6 +1,57 @@
 import pandas as pd
 import requests
-from config import BASE_DATA_URL, HEADERS, logger
+import yfinance as yf
+from datetime import datetime, timezone
+from config import BASE_DATA_URL, HEADERS, SPX_PROXY_MULTIPLIER, logger
+
+# --- SPX LIVE PRICE CACHE ---
+_spx_cache = {"price": None, "fetched_at": None}
+SPX_CACHE_TTL_SECONDS = 60  # Re-fetch from Yahoo at most once per minute
+
+
+def fetch_spx_live_price(spy_fallback_price: float = None) -> tuple[float, str]:
+    """
+    Fetches the real SPX index price from Yahoo Finance (^GSPC).
+    Returns (spx_price, source_label).
+    Falls back to SPY * multiplier if yfinance fails.
+    Results are cached for SPX_CACHE_TTL_SECONDS to avoid excessive API calls.
+    """
+    global _spx_cache
+    now = datetime.now(timezone.utc)
+
+    # Return cached value if still fresh
+    if (_spx_cache["price"] is not None
+            and _spx_cache["fetched_at"] is not None
+            and (now - _spx_cache["fetched_at"]).total_seconds() < SPX_CACHE_TTL_SECONDS):
+        logger.debug(f"SPX cache hit: ${_spx_cache['price']:.2f}")
+        return _spx_cache["price"], "Yahoo ^GSPC (cached)"
+
+    # Attempt live fetch
+    try:
+        ticker = yf.Ticker("^GSPC")
+        price = ticker.fast_info.get("lastPrice") or ticker.fast_info.get("last_price")
+        if price and price > 0:
+            _spx_cache["price"] = float(price)
+            _spx_cache["fetched_at"] = now
+            logger.info(f"Fetched live SPX from Yahoo Finance: ${price:.2f}")
+            return float(price), "Yahoo ^GSPC (live)"
+        else:
+            logger.warning("Yahoo Finance returned invalid SPX price.")
+    except Exception as e:
+        logger.warning(f"Yahoo Finance SPX fetch failed: {e}")
+
+    # Fallback: SPY * multiplier
+    if spy_fallback_price is not None:
+        fallback = spy_fallback_price * SPX_PROXY_MULTIPLIER
+        logger.warning(f"Using SPY proxy fallback: ${spy_fallback_price} * {SPX_PROXY_MULTIPLIER} = ${fallback:.2f}")
+        return fallback, f"SPY Proxy (x{SPX_PROXY_MULTIPLIER})"
+
+    # Last resort: return cached even if stale
+    if _spx_cache["price"] is not None:
+        logger.warning(f"Using stale SPX cache: ${_spx_cache['price']:.2f}")
+        return _spx_cache["price"], "Yahoo ^GSPC (stale cache)"
+
+    return None, "unavailable"
 
 def fetch_alpaca_market_data(symbol: str = "SPY"):
     """
@@ -33,7 +84,7 @@ def fetch_alpaca_market_data(symbol: str = "SPY"):
     # Convert Alpaca JSON into a Pandas DataFrame
     df = pd.DataFrame(bars_data)
     # Map Alpaca's shorthand keys to Pandas-TA standard column names
-    df.rename(columns={'o': 'Open', 'h': 'High', 'l': 'Low', 'c': 'Close', 'v': 'Volume', 'vw': 'VWAP', 't': 'Date'},
+    df.rename(columns={'o': 'Open', 'h': 'High', 'l': 'Low', 'c': 'Close', 'v': 'Volume', 'vw': 'VWAP_BAR', 't': 'Date'},
               inplace=True)
     df['Date'] = pd.to_datetime(df['Date'])
     df.set_index('Date', inplace=True)

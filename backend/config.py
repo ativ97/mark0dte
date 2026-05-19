@@ -1,6 +1,11 @@
 import logging
 import os
 import sys
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load .env from the backend directory
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 # --- LOGGING CONFIGURATION ---
 def setup_logging():
@@ -51,11 +56,12 @@ def setup_logging():
 logger = setup_logging()
 
 # --- API & DATA CONFIGURATION ---
-ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "PKE7TTHDCYW4PFXYPHDIHUKYJ6")
-ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "5ytWV4AYCRGqpLSQthwM1bjhvfMPePz94raPK1Q3hGu2")
+ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
+ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
 
-if ALPACA_API_KEY == "PKE7TTHDCYW4PFXYPHDIHUKYJ6" or ALPACA_SECRET_KEY == "5ytWV4AYCRGqpLSQthwM1bjhvfMPePz94raPK1Q3hGu2":
-    logger.warning("Using default Alpaca API keys. Please set environment variables for production.")
+if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
+    logger.error("ALPACA_API_KEY and ALPACA_SECRET_KEY must be set in backend/.env")
+    raise SystemExit("Missing Alpaca API credentials. Create backend/.env with ALPACA_API_KEY and ALPACA_SECRET_KEY.")
 
 BASE_DATA_URL = "https://data.alpaca.markets/v2/stocks"
 
@@ -73,3 +79,32 @@ RSI_DEAD_ZONE_LOWER = 45
 RSI_DEAD_ZONE_UPPER = 55
 EMA_COMPRESSION_THRESHOLD_PCT = 0.001  # 0.1% of price
 VWAP_ELASTICITY_THRESHOLD_PCT = 0.35
+
+# --- SPX PROXY ---
+# Alpaca does not provide SPX index data. We derive SPX from SPY * multiplier.
+# The true ratio drifts due to dividends/expense ratio. Calibrate periodically.
+# As of 2026-05: SPX ~5900, SPY ~590 => multiplier ~10.0
+SPX_PROXY_MULTIPLIER = 10.0
+
+# --- POSITION RISK BOUNDARIES (SPX Points) ---
+GAMMA_TRAP_THRESHOLD = 10    # Mandatory eject zone
+WARNING_ZONE_THRESHOLD = 25  # Volatility expansion warning
+SAFE_ZONE_THRESHOLD = 25     # Above this = theta decay safe
+MOAT_BAR_SCALE = 80          # Points range for the UI progress bar (0-100%)
+
+# --- RECOMMENDED MINIMUM MOAT PER REGIME ---
+# Positions with moat above WARNING but below these values get a CAUTION flag
+STATE_A_MIN_MOAT = 35   # Clean trend: tighter moats acceptable
+STATE_B_MIN_MOAT = 50   # Moderate chop: wider buffer needed
+STATE_C_MIN_MOAT = 70   # High entropy: maximum distance required
+
+# --- TIME-DELAYED VERIFICATION ---
+BREACH_VERIFICATION_MINUTES = 5  # Minutes condition must persist before kill switch
+
+# --- TIME PRESSURE (0DTE Gamma Acceleration) ---
+MARKET_CLOSE_HOUR_ET = 16       # 4:00 PM Eastern
+GAMMA_ACCELERATION_HOUR_ET = 14  # 2:00 PM Eastern — gamma ramp begins
+FINAL_HOUR_MOAT_MULTIPLIER = 1.5 # In final 2 hours, recommended moat is multiplied by this
+
+# --- VALID POSITION TYPES ---
+VALID_POSITION_TYPES = ["Put Spread", "Call Spread", "Iron Condor"]

@@ -3,7 +3,7 @@ import pandas_ta as ta
 import pandas as pd
 
 # Import the logic directly from your main backend file (the Canvas)
-from main import analyze_market_regime
+from engine import analyze_market_regime
 
 
 def run_historical_simulation():
