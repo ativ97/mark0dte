@@ -4,11 +4,11 @@ import numpy as np
 import sys
 import os
 
-# Ensure the backend directory is in the path so we can import main
+# Ensure the backend directory is in the path so we can import engine
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# Import the brain from your main code
-from main import analyze_market_regime
+# Import the brain from your newly modularized code
+from engine import analyze_market_regime
 
 
 class TestQuantEngine(unittest.TestCase):

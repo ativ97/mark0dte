@@ -4,7 +4,7 @@ export default function App() {
   const [telemetry, setTelemetry] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [activeTab, setActiveTab] = useState('dashboard'); // NEW: Tab state
+  const [activeTab, setActiveTab] = useState('dashboard');
 
   // Local state for the Manual Ledger
   const [positions, setPositions] = useState([]);
@@ -42,7 +42,7 @@ export default function App() {
     setPositions(positions.filter(p => p.id !== id));
   };
 
-  // NEW: Dynamic Context Helper
+  // Dynamic Context Helper
   const getStateContext = (score) => {
     if (score <= 1) {
       return [
@@ -81,7 +81,7 @@ export default function App() {
           </button>
         </div>
 
-        {/* NEW: Navigation Tabs */}
+        {/* Navigation Tabs */}
         <div className="flex space-x-4">
           <button
             onClick={() => setActiveTab('dashboard')}
@@ -110,28 +110,23 @@ export default function App() {
           <div className="lg:col-span-2 space-y-6">
 
             {/* Telemetry Matrix */}
-<div className="bg-slate-800 border border-slate-700 rounded-lg p-6 shadow-xl">
-  <h2 className="text-xl font-semibold mb-4 text-slate-300 border-b border-slate-700 pb-2">Live Telemetry</h2>
-  {loading && !telemetry ? (
-    <p className="text-slate-400 animate-pulse">Initializing data streams...</p>
-  ) : telemetry ? (
-    <div className="grid grid-cols-2 md:grid-cols-4 gap-4"> {/* Changed to md:grid-cols-4 for better layout */}
-      <MetricCard title="Spot Price" value={`$${telemetry.current_price}`} />
-      <MetricCard title="EMA 9" value={telemetry.ema_9} color={telemetry.current_price > telemetry.ema_9 ? "text-emerald-400" : "text-red-400"} />
-      <MetricCard title="EMA 21" value={telemetry.ema_21} color={telemetry.current_price > telemetry.ema_21 ? "text-emerald-400" : "text-red-400"} />
-      <MetricCard title="RSI (14)" value={telemetry.rsi_14} color={telemetry.rsi_14 > 60 || telemetry.rsi_14 < 40 ? "text-amber-400" : "text-slate-200"} />
-      <MetricCard title="CHOP (14)" value={telemetry.chop_value} color={telemetry.chop_value > 61.8 ? "text-red-400" : "text-emerald-400"} />
-      <MetricCard title="Efficiency (ER)" value={telemetry.er_value} color={telemetry.er_value < 0.20 ? "text-red-400" : "text-emerald-400"} />
-
-      {/* NEW: VWAP Deviation Card */}
-      <MetricCard
-        title="VWAP Deviation"
-        value={`${telemetry.vwap_dev}%`}
-        color={telemetry.vwap_dev > 0.35 ? "text-amber-400 font-extrabold animate-pulse" : "text-emerald-400"}
-      />
-    </div>
-  ) : null}
-</div>
+            <div className="bg-slate-800 border border-slate-700 rounded-lg p-6 shadow-xl">
+              <h2 className="text-xl font-semibold mb-4 text-slate-300 border-b border-slate-700 pb-2">Live Telemetry</h2>
+              {loading && !telemetry ? (
+                <p className="text-slate-400 animate-pulse">Initializing data streams...</p>
+              ) : telemetry ? (
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                  <MetricCard title="Data Source" value={telemetry.symbol} color="text-emerald-400 text-sm" />
+                  <MetricCard title="Spot Price" value={`$${telemetry.current_price}`} />
+                  <MetricCard title="EMA 9" value={telemetry.ema_9} color={telemetry.current_price > telemetry.ema_9 ? "text-emerald-400" : "text-red-400"} />
+                  <MetricCard title="EMA 21" value={telemetry.ema_21} color={telemetry.current_price > telemetry.ema_21 ? "text-emerald-400" : "text-red-400"} />
+                  <MetricCard title="RSI (14)" value={telemetry.rsi_14} color={telemetry.rsi_14 > 60 || telemetry.rsi_14 < 40 ? "text-amber-400" : "text-slate-200"} />
+                  <MetricCard title="CHOP (14)" value={telemetry.chop_value} color={telemetry.chop_value > 61.8 ? "text-red-400" : "text-emerald-400"} />
+                  <MetricCard title="Efficiency (ER)" value={telemetry.er_value} color={telemetry.er_value < 0.20 ? "text-red-400" : "text-emerald-400"} />
+                  <MetricCard title="VWAP Deviation" value={`${telemetry.vwap_dev}%`} color={telemetry.vwap_dev > 0.35 ? "text-amber-400 font-extrabold animate-pulse" : "text-emerald-400"} />
+                </div>
+              ) : null}
+            </div>
 
             {/* Regime Brain Output */}
             {telemetry && (
@@ -151,7 +146,7 @@ export default function App() {
                     <span className="font-bold text-lg text-slate-100">{telemetry.stop_loss_rule}</span>
                   </div>
 
-                  {/* NEW: Contextual Bullet Points */}
+                  {/* Contextual Bullet Points */}
                   <div className="mt-4 bg-slate-900/80 p-4 rounded border border-slate-700">
                     <h3 className="text-sm font-bold text-slate-300 mb-2 uppercase tracking-wide">Context & Rules for Current State</h3>
                     <ul className="list-disc list-inside text-sm text-slate-300 space-y-1">
