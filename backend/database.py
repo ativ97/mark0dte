@@ -37,6 +37,8 @@ class ClosedPositionDB(Base):
     opened_at = Column(DateTime)
     closed_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     close_reason = Column(String, default="manual")  # manual, eject, expired
+    close_price = Column(Float, nullable=True)  # What the position was closed at
+    realized_pl = Column(Float, nullable=True)  # credit - close_price (per contract)
 
 
 def get_db():

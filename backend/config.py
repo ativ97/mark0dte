@@ -63,6 +63,12 @@ if not ALPACA_API_KEY or not ALPACA_SECRET_KEY:
     logger.error("ALPACA_API_KEY and ALPACA_SECRET_KEY must be set in backend/.env")
     raise SystemExit("Missing Alpaca API credentials. Create backend/.env with ALPACA_API_KEY and ALPACA_SECRET_KEY.")
 
+# --- THETADATA OPTIONS API ---
+THETA_EMAIL = os.getenv("THETA_EMAIL")
+THETA_PASSWORD = os.getenv("THETA_PASSWORD")
+if not THETA_EMAIL or not THETA_PASSWORD:
+    logger.warning("THETA_EMAIL/THETA_PASSWORD not set in .env — GEX data will be unavailable")
+
 BASE_DATA_URL = "https://data.alpaca.markets/v2/stocks"
 
 HEADERS = {

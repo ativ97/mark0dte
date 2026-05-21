@@ -10,6 +10,49 @@ export default function App() {
   const [tradeAnalysis, setTradeAnalysis] = useState(null);
   const [analyzingTrade, setAnalyzingTrade] = useState(false);
 
+  // Trade History & Backtest state
+  const [tradeHistory, setTradeHistory] = useState(null);
+  const [backtestResult, setBacktestResult] = useState(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [backtestLoading, setBacktestLoading] = useState(false);
+  const [historyError, setHistoryError] = useState(null);
+
+  const uploadTradeHistory = async (file) => {
+    setHistoryLoading(true);
+    setHistoryError(null);
+    const form = new FormData();
+    form.append('file', file);
+    try {
+      const res = await fetch('http://127.0.0.1:8000/api/trade-history/upload', { method: 'POST', body: form });
+      if (!res.ok) throw new Error(await res.text());
+      setTradeHistory(await res.json());
+    } catch (err) {
+      setHistoryError(err.message || 'Upload failed');
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
+  const runBacktest = async (file) => {
+    setBacktestLoading(true);
+    setHistoryError(null);
+    const form = new FormData();
+    form.append('file', file);
+    try {
+      const res = await fetch('http://127.0.0.1:8000/api/trade-history/backtest', { method: 'POST', body: form });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      setTradeHistory({ stats: data.trade_stats, spreads: [] });
+      setBacktestResult(data.backtest);
+    } catch (err) {
+      setHistoryError(err.message || 'Backtest failed');
+    } finally {
+      setBacktestLoading(false);
+    }
+  };
+
+  const [selectedFile, setSelectedFile] = useState(null);
+
   const fetchTelemetry = async () => {
     try {
       const response = await fetch('http://127.0.0.1:8000/api/telemetry');
@@ -54,8 +97,13 @@ export default function App() {
 
   // Close Position (archive for analytics)
   const closePosition = async (id) => {
+    const input = prompt("Close price? (leave blank to skip P/L tracking)");
+    const closePrice = input ? parseFloat(input) : null;
     try {
-      await fetch(`http://127.0.0.1:8000/api/positions/${id}/close`, { method: 'POST' });
+      const url = closePrice !== null
+        ? `http://127.0.0.1:8000/api/positions/${id}/close?close_price=${closePrice}`
+        : `http://127.0.0.1:8000/api/positions/${id}/close`;
+      await fetch(url, { method: 'POST' });
       fetchTelemetry();
     } catch (err) {
       console.error("Failed to close position", err);
@@ -132,7 +180,7 @@ export default function App() {
         <div className="flex justify-between items-center mb-4">
           <div>
             <h1 className="text-3xl font-bold text-emerald-400">0DTE System Commander</h1>
-            <p className="text-slate-400 text-sm">Algorithmic Decision Support Matrix V3.0 (Persistent State)</p>
+            <p className="text-slate-400 text-sm">Algorithmic Decision Support Matrix V4.0</p>
           </div>
           <button onClick={fetchTelemetry} className="bg-slate-800 hover:bg-slate-700 text-slate-200 px-4 py-2 rounded shadow transition-colors">
             Refresh Data
@@ -141,6 +189,7 @@ export default function App() {
 
         <div className="flex space-x-4">
           <button onClick={() => setActiveTab('dashboard')} className={`px-4 py-2 rounded font-semibold transition-colors ${activeTab === 'dashboard' ? 'bg-emerald-600 text-white' : 'bg-slate-800 text-slate-400'}`}>Live Dashboard</button>
+          <button onClick={() => setActiveTab('history')} className={`px-4 py-2 rounded font-semibold transition-colors ${activeTab === 'history' ? 'bg-emerald-600 text-white' : 'bg-slate-800 text-slate-400'}`}>Trade History</button>
           <button onClick={() => setActiveTab('manual')} className={`px-4 py-2 rounded font-semibold transition-colors ${activeTab === 'manual' ? 'bg-emerald-600 text-white' : 'bg-slate-800 text-slate-400'}`}>System Manual</button>
         </div>
       </header>
@@ -393,6 +442,202 @@ export default function App() {
                       'bg-slate-800 text-slate-400'
                     }`}>{telemetry.momentum.momentum_label}</div>
                   </div>
+                  {/* --- VIX / EXPECTED MOVE --- */}
+                  {telemetry.expected_move && telemetry.expected_move.vix && (
+                    <div className="bg-slate-900/50 p-4 rounded border border-slate-700/50">
+                      <div className="text-xs text-slate-400 font-semibold uppercase tracking-wider mb-2">VIX Expected Move</div>
+                      <div className="grid grid-cols-3 gap-3 text-sm">
+                        <div>
+                          <span className="text-slate-500 text-xs">VIX</span>
+                          <div className={`font-bold ${telemetry.expected_move.vix > 25 ? 'text-red-400' : telemetry.expected_move.vix > 18 ? 'text-amber-400' : 'text-emerald-400'}`}>
+                            {telemetry.expected_move.vix}
+                          </div>
+                        </div>
+                        {telemetry.expected_move.vix9d && (
+                          <div>
+                            <span className="text-slate-500 text-xs">VIX9D</span>
+                            <div className="font-bold text-slate-200">{telemetry.expected_move.vix9d}</div>
+                          </div>
+                        )}
+                        <div>
+                          <span className="text-slate-500 text-xs">Eff. Vol</span>
+                          <div className="font-bold text-slate-200">{telemetry.expected_move.effective_vol}</div>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-3 gap-3 text-sm mt-2">
+                        <div>
+                          <span className="text-slate-500 text-xs">1σ Move</span>
+                          <div className="font-bold text-blue-400">±{telemetry.expected_move.expected_1sigma} pts</div>
+                        </div>
+                        <div>
+                          <span className="text-slate-500 text-xs">2σ Move</span>
+                          <div className="font-bold text-amber-400">±{telemetry.expected_move.expected_2sigma} pts</div>
+                        </div>
+                        <div>
+                          <span className="text-slate-500 text-xs">Rec Moat</span>
+                          <div className="font-bold text-emerald-400">{telemetry.expected_move.recommended_moat} pts</div>
+                        </div>
+                      </div>
+                      {telemetry.realized_distribution && (
+                        <div className="mt-3 pt-3 border-t border-slate-700/50">
+                          <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1.5">Reality Check ({telemetry.realized_distribution.lookback_days}d)</div>
+                          <div className="grid grid-cols-4 gap-1.5 text-xs">
+                            {['0.5', '1.0', '1.5', '2.0'].map(t => {
+                              const pct = telemetry.realized_distribution.exceedance?.[`pct_over_${t}`] || 0;
+                              return (
+                                <div key={t} className="text-center">
+                                  <div className="text-slate-500">±{t}%</div>
+                                  <div className="w-full bg-slate-800 rounded-full h-1.5 mt-0.5 mb-0.5">
+                                    <div className={`h-1.5 rounded-full ${pct > 30 ? 'bg-red-500' : pct > 15 ? 'bg-amber-500' : 'bg-blue-500'}`}
+                                      style={{width: `${Math.min(100, pct)}%`}} />
+                                  </div>
+                                  <div className={`font-bold ${pct > 30 ? 'text-red-400' : pct > 15 ? 'text-amber-400' : 'text-blue-400'}`}>{pct}%</div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                          <div className="text-[10px] text-slate-500 mt-1">Avg daily move: ±{telemetry.realized_distribution.mean_abs_move_pct}%</div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* --- REGIME TRANSITION PREDICTION --- */}
+                  {telemetry.regime_transition && (
+                    <div className={`p-4 rounded border ${
+                      telemetry.regime_transition.direction === 'DETERIORATING' ? 'bg-red-900/30 border-red-700/50' :
+                      telemetry.regime_transition.direction === 'SOFTENING' ? 'bg-amber-900/20 border-amber-700/50' :
+                      telemetry.regime_transition.direction === 'IMPROVING' ? 'bg-emerald-900/20 border-emerald-700/50' :
+                      telemetry.regime_transition.direction === 'FIRMING' ? 'bg-blue-900/20 border-blue-700/50' :
+                      'bg-slate-900/50 border-slate-700/50'
+                    }`}>
+                      <div className="flex justify-between items-center mb-1">
+                        <div className="text-xs text-slate-400 font-semibold uppercase tracking-wider">Regime Transition</div>
+                        <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${
+                          telemetry.regime_transition.direction === 'DETERIORATING' ? 'bg-red-600 text-white' :
+                          telemetry.regime_transition.direction === 'SOFTENING' ? 'bg-amber-600 text-white' :
+                          telemetry.regime_transition.direction === 'IMPROVING' ? 'bg-emerald-600 text-white' :
+                          telemetry.regime_transition.direction === 'FIRMING' ? 'bg-blue-600 text-white' :
+                          'bg-slate-600 text-slate-200'
+                        }`}>{telemetry.regime_transition.direction}</span>
+                      </div>
+                      <div className="text-sm text-slate-300 mb-2">{telemetry.regime_transition.label}</div>
+                      <div className="flex gap-3 text-xs text-slate-500">
+                        <span>Δ30m: <span className={`font-bold ${telemetry.regime_transition.score_delta_30m > 0 ? 'text-red-400' : telemetry.regime_transition.score_delta_30m < 0 ? 'text-emerald-400' : 'text-slate-400'}`}>{telemetry.regime_transition.score_delta_30m > 0 ? '+' : ''}{telemetry.regime_transition.score_delta_30m}</span></span>
+                        <span>ER: <span className="font-bold text-slate-300">{telemetry.regime_transition.er_trend}</span></span>
+                        <span>CHOP: <span className="font-bold text-slate-300">{telemetry.regime_transition.chop_trend}</span></span>
+                        <span>Conf: <span className="font-bold text-slate-300">{Math.round(telemetry.regime_transition.confidence * 100)}%</span></span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* --- INTRADAY WINDOW + MARKET EVENTS --- */}
+                  {telemetry.time_pressure?.intraday_window && (
+                    <div className={`p-4 rounded border ${
+                      telemetry.time_pressure.intraday_window.entry_quality >= 70 ? 'bg-emerald-900/20 border-emerald-700/50' :
+                      telemetry.time_pressure.intraday_window.entry_quality >= 40 ? 'bg-slate-900/50 border-slate-700/50' :
+                      'bg-red-900/20 border-red-700/50'
+                    }`}>
+                      <div className="flex justify-between items-center mb-2">
+                        <div className="text-xs text-slate-400 font-semibold uppercase tracking-wider">Trading Window</div>
+                        <div className="flex items-center gap-2">
+                          <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${
+                            telemetry.time_pressure.intraday_window.entry_quality >= 70 ? 'bg-emerald-600 text-white' :
+                            telemetry.time_pressure.intraday_window.entry_quality >= 40 ? 'bg-amber-600 text-white' :
+                            'bg-red-600 text-white'
+                          }`}>{telemetry.time_pressure.intraday_window.label}</span>
+                          <span className="text-xs text-slate-500">Entry: {telemetry.time_pressure.intraday_window.entry_quality}/100</span>
+                        </div>
+                      </div>
+                      <div className="text-sm text-slate-300 mb-1">{telemetry.time_pressure.intraday_window.description}</div>
+                      <div className="text-xs text-slate-400 italic">{telemetry.time_pressure.intraday_window.advice}</div>
+                    </div>
+                  )}
+
+                  {/* --- MARKET EVENTS --- */}
+                  {telemetry.time_pressure?.market_events && telemetry.time_pressure.market_events.risk_level !== 'NORMAL' && (
+                    <div className={`p-3 rounded border text-sm ${
+                      telemetry.time_pressure.market_events.risk_level === 'HIGH' ? 'bg-red-900/30 border-red-700/50 text-red-300' :
+                      telemetry.time_pressure.market_events.risk_level === 'ELEVATED' ? 'bg-amber-900/30 border-amber-700/50 text-amber-300' :
+                      'bg-blue-900/20 border-blue-700/50 text-blue-300'
+                    }`}>
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-xs font-bold uppercase tracking-wider text-slate-400">Calendar Events</span>
+                        <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                          telemetry.time_pressure.market_events.risk_level === 'HIGH' ? 'bg-red-600 text-white animate-pulse' :
+                          telemetry.time_pressure.market_events.risk_level === 'ELEVATED' ? 'bg-amber-600 text-white' :
+                          'bg-blue-600 text-white'
+                        }`}>{telemetry.time_pressure.market_events.risk_level} RISK</span>
+                      </div>
+                      <ul className="text-xs space-y-0.5">
+                        {telemetry.time_pressure.market_events.events.map((e, i) => (
+                          <li key={i} className="flex items-center gap-1">
+                            <span className="w-1 h-1 rounded-full bg-current shrink-0"></span>
+                            {e}
+                          </li>
+                        ))}
+                      </ul>
+                      {telemetry.time_pressure.market_events.moat_multiplier > 1.0 && (
+                        <div className="text-xs mt-1 font-bold">Moat widened ×{telemetry.time_pressure.market_events.moat_multiplier}</div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* --- GAMMA EXPOSURE (GEX) --- */}
+                  {telemetry.gex_data && telemetry.gex_data.gex_regime !== 'UNAVAILABLE' && (
+                    <div className={`p-4 rounded border ${
+                      telemetry.gex_data.gex_regime === 'POSITIVE' ? 'bg-emerald-900/20 border-emerald-700/50' :
+                      telemetry.gex_data.gex_regime === 'NEGATIVE' ? 'bg-red-900/20 border-red-700/50' :
+                      'bg-slate-900/50 border-slate-700/50'
+                    }`}>
+                      <div className="flex justify-between items-center mb-2">
+                        <div className="text-xs text-slate-400 font-semibold uppercase tracking-wider">Gamma Exposure (GEX)</div>
+                        <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                          telemetry.gex_data.gex_regime === 'POSITIVE' ? 'bg-emerald-600 text-white' :
+                          telemetry.gex_data.gex_regime === 'NEGATIVE' ? 'bg-red-600 text-white' :
+                          'bg-slate-600 text-white'
+                        }`}>{telemetry.gex_data.gex_regime}</span>
+                      </div>
+                      <div className="text-xs text-slate-400 mb-3">{telemetry.gex_data.gex_regime_label}</div>
+                      <div className="grid grid-cols-3 gap-2 mb-3">
+                        <div className="bg-slate-900/60 rounded p-2 text-center">
+                          <div className="text-[10px] text-emerald-400 font-bold">Gamma Wall</div>
+                          <div className="text-sm font-bold text-slate-100">{telemetry.gex_data.gamma_wall_spx.toLocaleString()}</div>
+                          <div className="text-[10px] text-slate-500">SPX magnet</div>
+                        </div>
+                        <div className="bg-slate-900/60 rounded p-2 text-center">
+                          <div className="text-[10px] text-red-400 font-bold">Put Wall</div>
+                          <div className="text-sm font-bold text-slate-100">{telemetry.gex_data.put_wall_spx.toLocaleString()}</div>
+                          <div className="text-[10px] text-slate-500">SPX floor</div>
+                        </div>
+                        <div className="bg-slate-900/60 rounded p-2 text-center">
+                          <div className="text-[10px] text-blue-400 font-bold">Call Wall</div>
+                          <div className="text-sm font-bold text-slate-100">{telemetry.gex_data.call_wall_spx.toLocaleString()}</div>
+                          <div className="text-[10px] text-slate-500">SPX ceiling</div>
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-between text-xs mb-2">
+                        <span className="text-slate-500">Net GEX</span>
+                        <span className={`font-bold ${telemetry.gex_data.net_gex > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                          {(telemetry.gex_data.net_gex / 1e6).toFixed(1)}M
+                        </span>
+                      </div>
+                      {telemetry.gex_data.top_levels && telemetry.gex_data.top_levels.length > 0 && (
+                        <div className="border-t border-slate-700/50 pt-2">
+                          <div className="text-[10px] text-slate-500 mb-1">Top GEX Levels (SPX)</div>
+                          <div className="flex flex-wrap gap-1">
+                            {telemetry.gex_data.top_levels.map((lvl, i) => (
+                              <span key={i} className="text-[10px] font-mono bg-slate-800 text-slate-300 px-1.5 py-0.5 rounded border border-slate-700">
+                                {lvl.strike_spx}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      <div className="text-[10px] text-slate-600 mt-2">{telemetry.gex_data.data_source} • {telemetry.gex_data.total_strikes} strikes</div>
+                    </div>
+                  )}
+
                   <div className={`p-3 rounded border text-sm ${
                     telemetry.time_pressure.time_pressure_level === 'HIGH' ? 'bg-red-900/30 border-red-700/50 text-red-300' :
                     telemetry.time_pressure.time_pressure_level === 'MODERATE' ? 'bg-amber-900/30 border-amber-700/50 text-amber-300' :
@@ -412,6 +657,32 @@ export default function App() {
 
           <div className="bg-slate-800 border border-slate-700 rounded-lg p-6 shadow-xl flex flex-col h-full">
             <h2 className="text-xl font-semibold mb-4 text-slate-300 border-b border-slate-700 pb-2">Smart Ledger V3 (Database)</h2>
+
+            {/* --- INTRADAY P/L DASHBOARD --- */}
+            {telemetry?.intraday_pl && (
+              <div className={`mb-4 rounded-lg p-3 border ${
+                telemetry.intraday_pl.total_pl >= 0 ? 'bg-emerald-900/20 border-emerald-700/50' : 'bg-red-900/20 border-red-700/50'
+              }`}>
+                <div className="flex justify-between items-center">
+                  <span className="text-xs text-slate-400 uppercase tracking-wider font-semibold">Day P/L</span>
+                  <span className={`text-lg font-bold ${telemetry.intraday_pl.total_pl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {telemetry.intraday_pl.total_pl >= 0 ? '+' : ''}${telemetry.intraday_pl.total_pl.toFixed(2)}
+                  </span>
+                </div>
+                <div className="flex gap-4 mt-1 text-xs">
+                  <span className="text-slate-400">
+                    Closed: <span className={telemetry.intraday_pl.closed_pl >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                      {telemetry.intraday_pl.closed_pl >= 0 ? '+' : ''}${telemetry.intraday_pl.closed_pl.toFixed(2)}
+                    </span> ({telemetry.intraday_pl.closed_count})
+                  </span>
+                  <span className="text-slate-400">
+                    Open: <span className={telemetry.intraday_pl.open_pl >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                      {telemetry.intraday_pl.open_pl >= 0 ? '+' : ''}${telemetry.intraday_pl.open_pl.toFixed(2)}
+                    </span> ({telemetry.intraday_pl.open_count})
+                  </span>
+                </div>
+              </div>
+            )}
 
             {/* --- POSITION SUMMARY (Iron Condor View) --- */}
             {telemetry?.position_summary && telemetry.position_summary.positions_total > 0 && (() => {
@@ -646,8 +917,18 @@ export default function App() {
                           <div className="flex items-center gap-2 text-xs text-slate-400">
                             <span>Credit: ${pos.credit}</span>
                             <span className={`font-bold ${pos.estimated_pl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                              P/L: {pos.estimated_pl >= 0 ? '+' : ''}{pos.estimated_pl?.toFixed(2)}
+                              Est. P/L: {pos.estimated_pl >= 0 ? '+' : ''}${pos.estimated_pl?.toFixed(2)}
                             </span>
+                            {pos.breakeven_event && (
+                              <span className="font-bold text-yellow-400 animate-pulse">
+                                BREAKEVEN ({pos.breakeven_event.touch_count}x)
+                              </span>
+                            )}
+                            {pos.drift_alert && (
+                              <span className="font-bold text-orange-400" title={`${pos.drift_alert.start_price}→${pos.drift_alert.current_price} over ${pos.drift_alert.window_minutes}min`}>
+                                ↗ DRIFT +{pos.drift_alert.drift_pts}pts
+                              </span>
+                            )}
                           </div>
                         </div>
                         <div className="flex items-center gap-1">
@@ -674,26 +955,68 @@ export default function App() {
                       {/* Exit Strategy */}
                       {pos.exit_strategy?.instruction && (
                         <div className={`mt-2 text-xs px-2.5 py-1.5 rounded border ${
+                          ['CRITICAL_EJECT', 'URGENT_CLOSE'].includes(pos.exit_strategy.action) ? 'bg-red-900/50 border-red-600/70 text-red-200 animate-pulse' :
                           pos.exit_strategy.action === 'CLOSE_NOW' ? 'bg-red-900/40 border-red-700/50 text-red-200' :
-                          pos.exit_strategy.action === 'CLOSE_SOON' ? 'bg-amber-900/30 border-amber-700/50 text-amber-200' :
+                          pos.exit_strategy.action === 'CLOSE_SOON' || pos.exit_strategy.action === 'CLOSE_RECOMMENDED' ? 'bg-amber-900/30 border-amber-700/50 text-amber-200' :
                           pos.exit_strategy.action === 'HOLD_WITH_TRIGGER' ? 'bg-blue-900/20 border-blue-700/40 text-blue-200' :
                           'bg-emerald-900/20 border-emerald-700/40 text-emerald-300'
                         }`}>
                           <div className="flex items-center gap-1.5">
                             <span className={`font-bold text-[10px] uppercase tracking-wider shrink-0 ${
+                              ['CRITICAL_EJECT', 'URGENT_CLOSE'].includes(pos.exit_strategy.action) ? 'text-red-300' :
                               pos.exit_strategy.action === 'CLOSE_NOW' ? 'text-red-400' :
                               pos.exit_strategy.action === 'CLOSE_SOON' ? 'text-amber-400' :
                               pos.exit_strategy.action === 'LET_EXPIRE' ? 'text-emerald-400' :
                               'text-slate-400'
                             }`}>{pos.exit_strategy.action.replace(/_/g, ' ')}</span>
+                            {pos.exit_strategy.escalation_level && !['SAFE', 'CAUTION'].includes(pos.exit_strategy.escalation_level) && (
+                              <span className={`text-[9px] font-bold px-1 py-0.5 rounded ${
+                                pos.exit_strategy.escalation_level === 'CRITICAL_EJECT' ? 'bg-red-600 text-white' :
+                                pos.exit_strategy.escalation_level === 'URGENT_CLOSE' ? 'bg-red-700 text-red-100' :
+                                pos.exit_strategy.escalation_level === 'CLOSE_RECOMMENDED' ? 'bg-amber-700 text-amber-100' :
+                                'bg-slate-600 text-slate-200'
+                              }`}>{pos.exit_strategy.escalation_level.replace(/_/g, ' ')}</span>
+                            )}
                             {pos.exit_strategy.target_price && (
-                              <span className="font-mono font-bold">@${pos.exit_strategy.target_price}</span>
+                              <span className="font-mono font-bold">Est. @${pos.exit_strategy.target_price}</span>
                             )}
                             {pos.exit_strategy.monitor_minutes > 0 && (
                               <span className="text-slate-500">| {pos.exit_strategy.monitor_minutes}min window</span>
                             )}
+                            {pos.exit_strategy.signal_age > 0 && (
+                              <span className={`text-[10px] ml-auto font-semibold ${
+                                pos.exit_strategy.signal_stability === 'STABLE' ? 'text-emerald-400' :
+                                pos.exit_strategy.signal_stability === 'CONFIRMING' ? 'text-blue-400' :
+                                pos.exit_strategy.signal_stability === 'LOCKED' ? 'text-amber-400' :
+                                pos.exit_strategy.signal_stability === 'COOLING' ? 'text-amber-300' :
+                                'text-slate-500'
+                              }`}>
+                                {pos.exit_strategy.signal_stability === 'STABLE' ? '✓ ' :
+                                 pos.exit_strategy.signal_stability === 'LOCKED' ? '🔒 ' :
+                                 pos.exit_strategy.signal_stability === 'NEW' ? '⚡ ' : ''}
+                                {pos.exit_strategy.signal_age}x {pos.exit_strategy.signal_stability}
+                              </span>
+                            )}
                           </div>
                           <div className="mt-0.5 text-slate-400">{pos.exit_strategy.instruction}</div>
+                          {pos.premium_trend && pos.premium_trend.readings >= 3 && (
+                            <div className="mt-1 flex items-center gap-2 text-[10px]">
+                              <span className={`font-bold ${
+                                pos.premium_trend.trend === 'RISING' ? 'text-red-400' :
+                                pos.premium_trend.trend === 'FALLING' ? 'text-emerald-400' :
+                                pos.premium_trend.trend === 'VOLATILE' ? 'text-amber-400' :
+                                'text-slate-500'
+                              }`}>
+                                {pos.premium_trend.trend === 'RISING' ? '📈' :
+                                 pos.premium_trend.trend === 'FALLING' ? '📉' :
+                                 pos.premium_trend.trend === 'VOLATILE' ? '〰️' : '—'}
+                                {' '}Est. ${pos.premium_trend.avg} avg
+                              </span>
+                              <span className="text-slate-600">
+                                (${pos.premium_trend.min}–${pos.premium_trend.max}, {pos.premium_trend.readings} reads)
+                              </span>
+                            </div>
+                          )}
                         </div>
                       )}
 
@@ -717,6 +1040,39 @@ export default function App() {
               )}
             </div>
           </div>
+
+          {/* --- TRADE PROPOSALS (Auto-suggested positions) --- */}
+          {telemetry?.trade_proposals && telemetry.trade_proposals.length > 0 && (
+            <div className="lg:col-span-3 bg-slate-800 border border-blue-700/50 rounded-lg shadow-xl p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <h2 className="text-lg font-semibold text-blue-400">Trade Ideas</h2>
+                <span className="text-xs text-slate-500">{telemetry.trade_proposals.length} candidates</span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {telemetry.trade_proposals.map((p, i) => (
+                  <div key={i} className={`p-3 rounded border ${
+                    p.verdict === 'STRONG_ENTRY' ? 'bg-emerald-900/20 border-emerald-700/50' : 'bg-slate-900/50 border-slate-700/50'
+                  }`}>
+                    <div className="flex justify-between items-center mb-1">
+                      <span className="font-bold text-sm text-slate-200">{p.type} @ {p.strike}</span>
+                      <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${
+                        p.verdict === 'STRONG_ENTRY' ? 'bg-emerald-700 text-emerald-100' : 'bg-blue-700 text-blue-100'
+                      }`}>{p.score}/100 {p.verdict.replace('_', ' ')}</span>
+                    </div>
+                    <div className="text-xs text-slate-400">
+                      Est. credit: ${p.estimated_credit} | Moat: {p.moat} pts
+                    </div>
+                    {p.reasons_for?.length > 0 && (
+                      <div className="text-[10px] text-emerald-400 mt-1">+ {p.reasons_for[0]}</div>
+                    )}
+                    {p.reasons_against?.length > 0 && (
+                      <div className="text-[10px] text-red-400">- {p.reasons_against[0]}</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* --- MARKET WATCH & OPPORTUNITIES (collapsible, market-wide only) --- */}
           {marketWatchRecs.length > 0 && (
@@ -749,23 +1105,227 @@ export default function App() {
 
         </div>
       )}
+      {activeTab === 'history' && (
+        <div className="max-w-6xl mx-auto space-y-6">
+          {/* UPLOAD SECTION */}
+          <div className="bg-slate-800 border border-slate-700 rounded-lg p-6 shadow-xl">
+            <h2 className="text-xl font-bold text-emerald-400 mb-2">Trade History & Backtest</h2>
+            <p className="text-sm text-slate-400 mb-4">Upload your Robinhood CSV export to analyze real trades and replay them against the regime engine using historical SPY data.</p>
+            <div className="flex flex-col sm:flex-row gap-3 items-start">
+              <input type="file" accept=".csv" onChange={e => setSelectedFile(e.target.files[0])} className="text-sm text-slate-300 file:mr-3 file:py-2 file:px-4 file:rounded file:border-0 file:bg-slate-700 file:text-slate-200 file:font-semibold hover:file:bg-slate-600 file:cursor-pointer" />
+              <button onClick={() => selectedFile && uploadTradeHistory(selectedFile)} disabled={!selectedFile || historyLoading} className={`px-5 py-2 rounded font-semibold text-sm transition-colors ${!selectedFile || historyLoading ? 'bg-slate-700 text-slate-500' : 'bg-blue-600 hover:bg-blue-500 text-white'}`}>
+                {historyLoading ? 'Parsing...' : 'Parse Trades'}
+              </button>
+              <button onClick={() => selectedFile && runBacktest(selectedFile)} disabled={!selectedFile || backtestLoading} className={`px-5 py-2 rounded font-semibold text-sm transition-colors ${!selectedFile || backtestLoading ? 'bg-slate-700 text-slate-500' : 'bg-emerald-600 hover:bg-emerald-500 text-white'}`}>
+                {backtestLoading ? 'Running Backtest...' : 'Parse + Backtest'}
+              </button>
+            </div>
+            {historyError && <div className="mt-3 text-sm text-red-400">{historyError}</div>}
+            {backtestLoading && <div className="mt-3 text-sm text-amber-400 animate-pulse">Fetching historical data from Alpaca and running regime analysis for each trade date... This may take a minute.</div>}
+          </div>
+
+          {/* TRADE STATS */}
+          {tradeHistory?.stats && tradeHistory.stats.total_trades > 0 && (
+            <div className="bg-slate-800 border border-slate-700 rounded-lg p-6 shadow-xl">
+              <h3 className="text-lg font-bold text-slate-200 mb-4">Performance Summary</h3>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+                <div className="bg-slate-900 rounded p-3 text-center">
+                  <div className="text-xs text-slate-500">Total Trades</div>
+                  <div className="text-2xl font-bold text-slate-100">{tradeHistory.stats.total_trades}</div>
+                </div>
+                <div className="bg-slate-900 rounded p-3 text-center">
+                  <div className="text-xs text-slate-500">Win Rate</div>
+                  <div className={`text-2xl font-bold ${tradeHistory.stats.win_rate >= 70 ? 'text-emerald-400' : tradeHistory.stats.win_rate >= 50 ? 'text-amber-400' : 'text-red-400'}`}>{tradeHistory.stats.win_rate}%</div>
+                </div>
+                <div className="bg-slate-900 rounded p-3 text-center">
+                  <div className="text-xs text-slate-500">Total P/L</div>
+                  <div className={`text-2xl font-bold ${tradeHistory.stats.total_pl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>${tradeHistory.stats.total_pl}</div>
+                </div>
+                <div className="bg-slate-900 rounded p-3 text-center">
+                  <div className="text-xs text-slate-500">Profit Factor</div>
+                  <div className="text-2xl font-bold text-slate-100">{tradeHistory.stats.profit_factor === Infinity ? '∞' : tradeHistory.stats.profit_factor}</div>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+                <div className="bg-slate-900 rounded p-3 text-center">
+                  <div className="text-xs text-slate-500">Wins / Losses</div>
+                  <div className="text-lg font-bold"><span className="text-emerald-400">{tradeHistory.stats.wins}</span> / <span className="text-red-400">{tradeHistory.stats.losses}</span></div>
+                </div>
+                <div className="bg-slate-900 rounded p-3 text-center">
+                  <div className="text-xs text-slate-500">Put Win Rate</div>
+                  <div className="text-lg font-bold text-slate-200">{tradeHistory.stats.put_win_rate}% <span className="text-xs text-slate-500">({tradeHistory.stats.put_trades})</span></div>
+                </div>
+                <div className="bg-slate-900 rounded p-3 text-center">
+                  <div className="text-xs text-slate-500">Call Win Rate</div>
+                  <div className="text-lg font-bold text-slate-200">{tradeHistory.stats.call_win_rate}% <span className="text-xs text-slate-500">({tradeHistory.stats.call_trades})</span></div>
+                </div>
+                <div className="bg-slate-900 rounded p-3 text-center">
+                  <div className="text-xs text-slate-500">Avg P/L per Trade</div>
+                  <div className={`text-lg font-bold ${tradeHistory.stats.avg_pl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>${tradeHistory.stats.avg_pl}</div>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="bg-emerald-900/20 border border-emerald-700/40 rounded p-3">
+                  <div className="text-xs text-emerald-400 font-bold">Best Trade</div>
+                  <div className="text-sm text-slate-200">{tradeHistory.stats.best_trade.date} — {tradeHistory.stats.best_trade.label}</div>
+                  <div className="text-lg font-bold text-emerald-400">${tradeHistory.stats.best_trade.pl}</div>
+                </div>
+                <div className="bg-red-900/20 border border-red-700/40 rounded p-3">
+                  <div className="text-xs text-red-400 font-bold">Worst Trade</div>
+                  <div className="text-sm text-slate-200">{tradeHistory.stats.worst_trade.date} — {tradeHistory.stats.worst_trade.label}</div>
+                  <div className="text-lg font-bold text-red-400">${tradeHistory.stats.worst_trade.pl}</div>
+                </div>
+              </div>
+              {tradeHistory.stats.outcome_distribution && (
+                <div className="mt-4 bg-slate-900 rounded p-3">
+                  <div className="text-xs text-slate-500 mb-2">Outcome Distribution</div>
+                  <div className="flex flex-wrap gap-2">
+                    {Object.entries(tradeHistory.stats.outcome_distribution).map(([k, v]) => (
+                      <span key={k} className={`text-xs font-bold px-2 py-1 rounded ${
+                        k === 'EXPIRED' ? 'bg-emerald-900/50 text-emerald-400' :
+                        k === 'ASSIGNED' ? 'bg-red-900/50 text-red-400' :
+                        k === 'CLOSED' ? 'bg-blue-900/50 text-blue-400' :
+                        'bg-slate-700 text-slate-300'
+                      }`}>{k}: {v}</span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* BACKTEST RESULTS */}
+          {backtestResult?.summary && (
+            <div className="bg-slate-800 border border-slate-700 rounded-lg p-6 shadow-xl">
+              <h3 className="text-lg font-bold text-slate-200 mb-2">Backtest: System vs Your Trades</h3>
+              <p className="text-xs text-slate-400 mb-4">Each trade date was replayed through the regime engine using historical SPY 5-min bars. The system verdict shows what it would have recommended for your actual strikes.</p>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+                <div className="bg-slate-900 rounded p-3 text-center">
+                  <div className="text-xs text-slate-500">Days Analyzed</div>
+                  <div className="text-2xl font-bold text-slate-100">{backtestResult.summary.days_processed}</div>
+                </div>
+                <div className="bg-slate-900 rounded p-3 text-center">
+                  <div className="text-xs text-slate-500">System Exit Flags</div>
+                  <div className="text-2xl font-bold text-amber-400">{backtestResult.summary.system_exit_flags}</div>
+                </div>
+                <div className="bg-slate-900 rounded p-3 text-center">
+                  <div className="text-xs text-slate-500">System Safe Flags</div>
+                  <div className="text-2xl font-bold text-emerald-400">{backtestResult.summary.system_safe_flags}</div>
+                </div>
+                <div className="bg-slate-900 rounded p-3 text-center">
+                  <div className="text-xs text-slate-500">Potential Savings</div>
+                  <div className="text-2xl font-bold text-blue-400">${backtestResult.summary.potential_savings}</div>
+                </div>
+              </div>
+              {backtestResult.summary.alignment && (
+                <div className="bg-slate-900 rounded p-3 mb-4">
+                  <div className="text-xs text-slate-500 mb-2">Alignment Analysis</div>
+                  <div className="flex flex-wrap gap-2">
+                    {Object.entries(backtestResult.summary.alignment).map(([k, v]) => (
+                      <span key={k} className={`text-xs font-bold px-2 py-1 rounded ${
+                        k === 'ALIGNED_WIN' ? 'bg-emerald-900/50 text-emerald-400' :
+                        k === 'SYSTEM_CORRECT' ? 'bg-blue-900/50 text-blue-400' :
+                        k === 'LUCKY_WIN' ? 'bg-amber-900/50 text-amber-400' :
+                        k === 'BOTH_WRONG' ? 'bg-red-900/50 text-red-400' :
+                        'bg-slate-700 text-slate-300'
+                      }`}>{k.replace(/_/g, ' ')}: {v}</span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* DAILY BREAKDOWN TABLE */}
+              {backtestResult.daily_results && (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="text-xs text-slate-500 border-b border-slate-700">
+                        <th className="text-left py-2 px-2">Date</th>
+                        <th className="text-left px-2">Spread</th>
+                        <th className="text-right px-2">P/L</th>
+                        <th className="text-right px-2">Min Moat</th>
+                        <th className="text-center px-2">System</th>
+                        <th className="text-center px-2">Alignment</th>
+                        <th className="text-left px-2">Detail</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {backtestResult.daily_results.flatMap((day) =>
+                        day.spreads.map((s, j) => (
+                          <tr key={`${day.date}-${j}`} className="border-b border-slate-800 hover:bg-slate-700/30">
+                            <td className="py-2 px-2 font-mono text-slate-300">{day.display_date}</td>
+                            <td className="px-2">
+                              <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${s.type === 'Put Spread' ? 'bg-red-900/40 text-red-400' : 'bg-emerald-900/40 text-emerald-400'}`}>{s.label}</span>
+                              <span className="text-[10px] text-slate-500 ml-1">x{s.contracts}</span>
+                            </td>
+                            <td className={`text-right px-2 font-bold ${s.won ? 'text-emerald-400' : 'text-red-400'}`}>${s.net_pl}</td>
+                            <td className={`text-right px-2 font-bold ${s.min_moat <= 0 ? 'text-red-500' : s.min_moat <= 15 ? 'text-red-400' : s.min_moat <= 30 ? 'text-amber-400' : 'text-slate-300'}`}>{s.min_moat} pts</td>
+                            <td className="text-center px-2">
+                              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                                s.system_verdict === 'SAFE' ? 'bg-emerald-900/50 text-emerald-400' :
+                                s.system_verdict === 'EXIT_RECOMMENDED' ? 'bg-red-900/50 text-red-400' :
+                                'bg-amber-900/50 text-amber-400'
+                              }`}>{s.system_verdict}</span>
+                            </td>
+                            <td className="text-center px-2">
+                              <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                                s.alignment === 'ALIGNED_WIN' ? 'bg-emerald-900/50 text-emerald-400' :
+                                s.alignment === 'SYSTEM_CORRECT' ? 'bg-blue-900/50 text-blue-400' :
+                                s.alignment === 'LUCKY_WIN' ? 'bg-amber-900/50 text-amber-400' :
+                                s.alignment === 'BOTH_WRONG' ? 'bg-red-900/50 text-red-400' :
+                                'bg-slate-700 text-slate-300'
+                              }`}>{s.alignment.replace(/_/g, ' ')}</span>
+                            </td>
+                            <td className="px-2 text-xs text-slate-400 max-w-[250px] truncate">{s.system_detail}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
       {activeTab === 'manual' && (
         <div className="max-w-4xl mx-auto space-y-6">
 
           {/* --- QUICK START --- */}
           <div className="bg-slate-800 border border-slate-700 rounded-lg p-8 shadow-xl">
             <h2 className="text-2xl font-bold text-emerald-400 mb-2">System Manual & User Guide</h2>
-            <p className="text-slate-400 text-sm mb-6 border-b border-slate-700 pb-4">0DTE Algorithmic Decision Support Matrix V3.0</p>
+            <p className="text-slate-400 text-sm mb-6 border-b border-slate-700 pb-4">0DTE Algorithmic Decision Support Matrix V5.0</p>
 
             <h3 className="text-lg font-semibold text-slate-200 mb-3">Quick Start</h3>
             <ol className="list-decimal list-inside text-sm text-slate-300 space-y-2 mb-6">
-              <li>Open the <span className="text-emerald-400 font-semibold">Live Dashboard</span> tab. The system auto-fetches SPY data from Alpaca every 30 seconds and computes the regime state.</li>
-              <li>Check the <span className="text-amber-400 font-semibold">Market State</span> card to see the current regime (A, B, or C) and the recommended moat width.</li>
-              <li>Before placing a trade, verify your planned short strike is at least as far away as the <span className="font-semibold text-slate-100">Required Moat Width</span>.</li>
-              <li>After entering a position in your broker, log it in the <span className="text-emerald-400 font-semibold">Smart Ledger</span> panel on the right. Select the spread type, enter the SPX short strike, and the credit received.</li>
-              <li>The system will compute a live moat (distance in SPX points) and display a color-coded status for each position. Follow the directives.</li>
-              <li>When you close a position in your broker, click the <span className="text-red-400 font-semibold">X</span> button on that position to remove it from tracking.</li>
+              <li>Open the <span className="text-emerald-400 font-semibold">Live Dashboard</span> tab. The system auto-fetches SPY data from Alpaca every 30 seconds and computes the market regime.</li>
+              <li>Check the <span className="text-amber-400 font-semibold">Market State</span> to see the current regime (A, B, or C) and the <span className="font-semibold text-slate-100">Smart Moat</span> width.</li>
+              <li>Check the <span className="text-emerald-400 font-semibold">Trading Window</span> panel. It tells you if now is a good time to enter trades (entry quality score from 0 to 100).</li>
+              <li>Before placing a trade, verify your planned short strike is at least as far away as the Smart Moat width. Use the <span className="text-emerald-400 font-semibold">Trade Analyzer</span> to score your setup before entering.</li>
+              <li>After entering a position in your broker, log it in the <span className="text-emerald-400 font-semibold">Smart Ledger</span> panel on the right.</li>
+              <li>The system monitors each position in real-time. Follow the exit directives it displays — they adjust based on time of day and market conditions.</li>
+              <li>When you close a position in your broker, click the <span className="text-red-400 font-semibold">X</span> button to remove it from tracking.</li>
             </ol>
+          </div>
+
+          {/* --- WHAT IS 0DTE? --- */}
+          <div className="bg-slate-800 border border-slate-700 rounded-lg p-8 shadow-xl">
+            <h3 className="text-lg font-semibold text-slate-200 mb-4">What is 0DTE Trading?</h3>
+            <div className="text-sm text-slate-300 space-y-3">
+              <p><span className="font-semibold text-slate-100">0DTE</span> stands for "zero days to expiration." These are options contracts that expire the same day they are traded.</p>
+              <p>The strategy this system supports is <span className="font-semibold text-emerald-400">selling credit spreads</span>. You sell an option at one strike and buy a protective option further out. You collect a small premium (credit) upfront. If SPX stays away from your short strike until 4:00 PM ET, both options expire worthless and you keep the credit as profit.</p>
+              <p>The two key concepts:</p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mt-2">
+                <div className="bg-slate-900/50 p-3 rounded border border-slate-700">
+                  <span className="font-bold text-emerald-400">Theta (Time Decay)</span>
+                  <p className="text-slate-400 mt-1">Your friend. As the clock ticks toward 4 PM, the option you sold loses value. This is how you profit — the premium you collected melts away to zero.</p>
+                </div>
+                <div className="bg-slate-900/50 p-3 rounded border border-slate-700">
+                  <span className="font-bold text-red-400">Gamma (Movement Risk)</span>
+                  <p className="text-slate-400 mt-1">Your enemy. If SPX moves toward your strike, losses accelerate. The closer to expiry, the more violent these moves become. This is why moat distance matters.</p>
+                </div>
+              </div>
+            </div>
           </div>
 
           {/* --- MARKET STATES --- */}
@@ -781,7 +1341,7 @@ export default function App() {
                 </div>
                 <ul className="text-sm text-slate-300 space-y-1 ml-4">
                   <li><span className="font-semibold text-slate-100">What it means:</span> The market has a clear directional bias. EMAs are separated, RSI shows momentum, CHOP is low, and price is moving efficiently.</li>
-                  <li><span className="font-semibold text-slate-100">What to do:</span> Directional credit spreads are authorized (e.g., Put Spreads if bullish). You can use tighter moats (35-40 SPX points from your short strike).</li>
+                  <li><span className="font-semibold text-slate-100">What to do:</span> Directional credit spreads are authorized (e.g., Put Spreads if bullish). You can use tighter moats (35-40 SPX points).</li>
                   <li><span className="font-semibold text-slate-100">Stop-loss rule:</span> Strict 200% of premium received. If you collected $0.80, exit if the spread hits $1.60 debit.</li>
                 </ul>
               </div>
@@ -792,9 +1352,9 @@ export default function App() {
                   <h4 className="font-bold text-amber-400">State B: Moderate Chop</h4>
                 </div>
                 <ul className="text-sm text-slate-300 space-y-1 ml-4">
-                  <li><span className="font-semibold text-slate-100">What it means:</span> Mixed signals. Some indicators show trend, others show consolidation. Price may be range-bound with occasional breakout fakes.</li>
+                  <li><span className="font-semibold text-slate-100">What it means:</span> Mixed signals. Some indicators show trend, others show consolidation. False breakouts possible.</li>
                   <li><span className="font-semibold text-slate-100">What to do:</span> Prefer neutral strategies (Iron Condors). Widen your moat to 50-60 SPX points.</li>
-                  <li><span className="font-semibold text-slate-100">Stop-loss rule:</span> Hybrid approach. Exit at 250% premium OR if SPX moves within 15 points of your short strike, whichever comes first.</li>
+                  <li><span className="font-semibold text-slate-100">Stop-loss rule:</span> Hybrid: Exit at 250% premium OR if SPX moves within 15 points of your strike.</li>
                 </ul>
               </div>
 
@@ -804,10 +1364,34 @@ export default function App() {
                   <h4 className="font-bold text-red-400">State C: High Entropy / Whipsaw</h4>
                 </div>
                 <ul className="text-sm text-slate-300 space-y-1 ml-4">
-                  <li><span className="font-semibold text-slate-100">What it means:</span> All indicators show chop. EMAs are compressed, RSI is dead-zone (45-55), efficiency ratio is very low. High risk of false breakouts and whipsaws.</li>
-                  <li><span className="font-semibold text-slate-100">What to do:</span> Strictly neutral deployments only. Push moats out to 70+ SPX points. Consider sitting out entirely if you can't get that width at acceptable credit.</li>
-                  <li><span className="font-semibold text-slate-100">Stop-loss rule:</span> Ignore premium spikes entirely (IV crush causes artificial premium inflation). Use asset-boundary stops ONLY. Exit only if SPX physically approaches your strike.</li>
+                  <li><span className="font-semibold text-slate-100">What it means:</span> All indicators show chop. High risk of false breakouts and sudden reversals.</li>
+                  <li><span className="font-semibold text-slate-100">What to do:</span> Strictly neutral deployments only. Push moats to 70+ SPX points. Consider sitting out.</li>
+                  <li><span className="font-semibold text-slate-100">Stop-loss rule:</span> Ignore premium spikes (they're caused by IV, not real moves). Exit only if SPX physically approaches your strike.</li>
                 </ul>
+              </div>
+            </div>
+          </div>
+
+          {/* --- SMART MOAT --- */}
+          <div className="bg-slate-800 border border-slate-700 rounded-lg p-8 shadow-xl">
+            <h3 className="text-lg font-semibold text-slate-200 mb-4">Smart Moat System</h3>
+            <p className="text-sm text-slate-400 mb-4">The "moat" is the distance in SPX points between the current price and your short strike. A wider moat = more safety. The Smart Moat dynamically adjusts the recommended width using five factors:</p>
+            <div className="space-y-3 text-sm">
+              <div className="bg-slate-900/50 p-3 rounded border border-slate-700">
+                <span className="font-bold text-blue-400">VIX Expected Move</span>
+                <p className="text-slate-400 mt-1">The base moat is calculated from the VIX (market fear index). Higher VIX = wider moat. The math: SPX price x (VIX/100) x sqrt(hours remaining / trading hours per year). This replaces guesswork with a mathematically grounded starting point.</p>
+              </div>
+              <div className="bg-slate-900/50 p-3 rounded border border-slate-700">
+                <span className="font-bold text-slate-100">Range Context</span>
+                <p className="text-slate-400 mt-1">If the day's range is tight (&lt;40 pts), the moat shrinks. If the range is expanding (&gt;110 pts), the moat widens. A tight range means the market isn't moving much, so you don't need as much buffer.</p>
+              </div>
+              <div className="bg-slate-900/50 p-3 rounded border border-slate-700">
+                <span className="font-bold text-slate-100">Time Decay Credit</span>
+                <p className="text-slate-400 mt-1">Positions that have survived most of the day deserve smaller moats. With 1 hour left, theta is aggressively decaying option premiums, so you need less buffer. The moat shrinks up to 45% in the final hour.</p>
+              </div>
+              <div className="bg-slate-900/50 p-3 rounded border border-slate-700">
+                <span className="font-bold text-slate-100">Calendar Events</span>
+                <p className="text-slate-400 mt-1">On high-volatility days (FOMC, CPI, Jobs Report, OPEX), moats are automatically widened. For example, FOMC days add a 40% buffer. The system knows the 2026 event calendar.</p>
               </div>
             </div>
           </div>
@@ -815,67 +1399,257 @@ export default function App() {
           {/* --- RISK ZONES --- */}
           <div className="bg-slate-800 border border-slate-700 rounded-lg p-8 shadow-xl">
             <h3 className="text-lg font-semibold text-slate-200 mb-4">Position Risk Zones</h3>
-            <p className="text-sm text-slate-400 mb-4">For each tracked position, the system calculates the "moat" — the distance in SPX points between the current price and your short strike. This maps to three zones:</p>
+            <p className="text-sm text-slate-400 mb-4">Each tracked position gets a color-coded status based on its moat distance:</p>
 
             <div className="space-y-3">
               <div className="flex items-start gap-3 bg-slate-900/50 p-4 rounded border border-slate-700">
                 <span className="bg-emerald-500 rounded-full w-3 h-3 mt-1 flex-shrink-0"></span>
                 <div>
                   <span className="font-bold text-emerald-400">SAFE ZONE (&gt; 25 points)</span>
-                  <p className="text-sm text-slate-300">Your position has a healthy buffer. Theta decay is working in your favor. No action needed — let time do the work.</p>
+                  <p className="text-sm text-slate-300">Healthy buffer. Theta is working for you. No action needed — let time do the work.</p>
                 </div>
               </div>
               <div className="flex items-start gap-3 bg-slate-900/50 p-4 rounded border border-slate-700">
                 <span className="bg-amber-400 rounded-full w-3 h-3 mt-1 flex-shrink-0"></span>
                 <div>
                   <span className="font-bold text-amber-400">WARNING ZONE (10-25 points)</span>
-                  <p className="text-sm text-slate-300">Volatility expansion is likely. The system displays a regime-specific stop-loss directive. Be ready to act. Watch the stop-loss protocol displayed for each position — it changes based on the current market state.</p>
+                  <p className="text-sm text-slate-300">Getting close. The system activates time-aware stop-loss protocols that change based on how much time is left (see Time-Aware Exits below).</p>
                 </div>
               </div>
               <div className="flex items-start gap-3 bg-slate-900/50 p-4 rounded border border-slate-700">
                 <span className="bg-red-500 rounded-full w-3 h-3 mt-1 flex-shrink-0"></span>
                 <div>
                   <span className="font-bold text-red-400">GAMMA TRAP (0-10 points)</span>
-                  <p className="text-sm text-slate-300">Critical danger zone. Delta/Gamma risk overrides any Theta edge. The system starts a 5-minute verification countdown. If SPX remains breached after 5 minutes, a <span className="text-red-400 font-bold">CRITICAL EJECT</span> order is issued. If the price recovers before the timer expires (whipsaw immunity), the timer resets and you stay in the trade.</p>
+                  <p className="text-sm text-slate-300">Critical danger. A 5-minute verification timer starts. If SPX stays breached for 5 minutes, a <span className="text-red-400 font-bold">CRITICAL EJECT</span> is issued. If price recovers (whipsaw), the timer resets — this prevents you from getting stopped out on a false spike.</p>
                 </div>
               </div>
             </div>
           </div>
 
+          {/* --- TIME-AWARE EXIT STRATEGIES --- */}
+          <div className="bg-slate-800 border border-slate-700 rounded-lg p-8 shadow-xl">
+            <h3 className="text-lg font-semibold text-slate-200 mb-4">Time-Aware Exit Strategies</h3>
+            <p className="text-sm text-slate-400 mb-4">When a position enters the Warning Zone, the system does not blindly eject. Instead, it adjusts its behavior based on time remaining until 4:00 PM ET:</p>
+
+            <div className="space-y-3 text-sm">
+              <div className="bg-slate-900/50 p-4 rounded border border-emerald-700/50">
+                <span className="font-bold text-emerald-400">Final 30 Minutes (3:30-4:00 PM)</span>
+                <p className="text-slate-300 mt-1">HOLD unless your strike is actually breached. Premium spikes are ignored entirely because theta decay is at maximum — options are melting to zero. Don't exit a winning position over a temporary price blip.</p>
+              </div>
+              <div className="bg-slate-900/50 p-4 rounded border border-blue-700/50">
+                <span className="font-bold text-blue-400">Final Hour (3:00-3:30 PM)</span>
+                <p className="text-slate-300 mt-1">Premium-based stops are suspended. The system only exits if the underlying asset sustains a breach for 10+ minutes. Short-lived spikes are filtered out.</p>
+              </div>
+              <div className="bg-slate-900/50 p-4 rounded border border-amber-700/50">
+                <span className="font-bold text-amber-400">1-2 Hours Left (2:00-3:00 PM)</span>
+                <p className="text-slate-300 mt-1">Stops are widened to 250% and require 5 minutes of verification. This prevents whipsaw exits during the volatile afternoon session.</p>
+              </div>
+              <div className="bg-slate-900/50 p-4 rounded border border-slate-700">
+                <span className="font-bold text-slate-100">&gt; 2 Hours Left (Morning/Midday)</span>
+                <p className="text-slate-300 mt-1">Standard stop-loss rules apply based on the current Market State (A, B, or C).</p>
+              </div>
+            </div>
+          </div>
+
+          {/* --- VIX & EXPECTED MOVE --- */}
+          <div className="bg-slate-800 border border-slate-700 rounded-lg p-8 shadow-xl">
+            <h3 className="text-lg font-semibold text-slate-200 mb-4">VIX & Expected Move</h3>
+            <div className="text-sm text-slate-300 space-y-3">
+              <p>The <span className="font-semibold text-slate-100">VIX</span> is the market's "fear gauge." It measures how much the market expects SPX to move. A VIX of 15 is calm; 25+ is nervous; 35+ is panicking.</p>
+              <p>The dashboard shows three derived values from the VIX:</p>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div className="bg-slate-900/50 p-3 rounded border border-slate-700">
+                  <span className="font-bold text-blue-400">1-sigma Move</span>
+                  <p className="text-slate-400 mt-1">The expected range that SPX will stay within ~68% of the time. Think of it as the "normal" range for the rest of the day.</p>
+                </div>
+                <div className="bg-slate-900/50 p-3 rounded border border-slate-700">
+                  <span className="font-bold text-amber-400">2-sigma Move</span>
+                  <p className="text-slate-400 mt-1">The wider range covering ~95% of outcomes. Your strike should ideally be outside this range.</p>
+                </div>
+                <div className="bg-slate-900/50 p-3 rounded border border-slate-700">
+                  <span className="font-bold text-emerald-400">Recommended Moat</span>
+                  <p className="text-slate-400 mt-1">Set at 1.5x the 1-sigma move. This is the math-based minimum distance for your short strike.</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* --- TRADING WINDOWS --- */}
+          <div className="bg-slate-800 border border-slate-700 rounded-lg p-8 shadow-xl">
+            <h3 className="text-lg font-semibold text-slate-200 mb-4">Trading Windows</h3>
+            <p className="text-sm text-slate-400 mb-4">The market behaves differently at different times of day. The system classifies the current period and gives each an entry quality score (0-100):</p>
+            <div className="space-y-2 text-sm">
+              <div className="flex items-center gap-3 bg-slate-900/50 p-3 rounded border border-red-700/30">
+                <span className="text-red-400 font-bold w-32 shrink-0">9:30 - 10:00</span>
+                <span className="text-slate-300">Opening Drive (score: 20). Wild volatility, fake breakouts. Avoid new entries.</span>
+              </div>
+              <div className="flex items-center gap-3 bg-slate-900/50 p-3 rounded border border-emerald-700/30">
+                <span className="text-emerald-400 font-bold w-32 shrink-0">10:00 - 11:30</span>
+                <span className="text-slate-300">Trend Establishment (score: 90). Best window for 0DTE entries. Regime signals most reliable.</span>
+              </div>
+              <div className="flex items-center gap-3 bg-slate-900/50 p-3 rounded border border-slate-700">
+                <span className="text-slate-300 font-bold w-32 shrink-0">11:30 - 1:00</span>
+                <span className="text-slate-300">Lunch Lull (score: 65). Lower volume, tighter ranges. Good for cautious entries.</span>
+              </div>
+              <div className="flex items-center gap-3 bg-slate-900/50 p-3 rounded border border-slate-700">
+                <span className="text-slate-300 font-bold w-32 shrink-0">1:00 - 2:30</span>
+                <span className="text-slate-300">Afternoon Session (score: 55). Trend can reverse. Use caution.</span>
+              </div>
+              <div className="flex items-center gap-3 bg-slate-900/50 p-3 rounded border border-amber-700/30">
+                <span className="text-amber-400 font-bold w-32 shrink-0">2:30 - 3:00</span>
+                <span className="text-slate-300">Pre-Power Hour (score: 25). Avoid new positions. Manage existing risk.</span>
+              </div>
+              <div className="flex items-center gap-3 bg-slate-900/50 p-3 rounded border border-red-700/30">
+                <span className="text-red-400 font-bold w-32 shrink-0">3:00 - 4:00</span>
+                <span className="text-slate-300">Power Hour / Final Minutes (score: 0-10). No new entries. Hold safe positions. Let theta work.</span>
+              </div>
+            </div>
+          </div>
+
+          {/* --- REGIME TRANSITION --- */}
+          <div className="bg-slate-800 border border-slate-700 rounded-lg p-8 shadow-xl">
+            <h3 className="text-lg font-semibold text-slate-200 mb-4">Regime Transition Prediction</h3>
+            <p className="text-sm text-slate-400 mb-4">The system compares current indicator readings to where they were 30 minutes ago. This tells you if the market regime is shifting:</p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+              <div className="bg-red-900/20 p-3 rounded border border-red-700/50">
+                <span className="font-bold text-red-400">DETERIORATING</span>
+                <p className="text-slate-400 mt-1">Regime is degrading fast. Chop increasing, trend fading. Widen moats and avoid new entries.</p>
+              </div>
+              <div className="bg-amber-900/20 p-3 rounded border border-amber-700/50">
+                <span className="font-bold text-amber-400">SOFTENING</span>
+                <p className="text-slate-400 mt-1">Trend is starting to weaken. Not critical yet, but watch for a full State transition.</p>
+              </div>
+              <div className="bg-emerald-900/20 p-3 rounded border border-emerald-700/50">
+                <span className="font-bold text-emerald-400">IMPROVING</span>
+                <p className="text-slate-400 mt-1">Regime is getting stronger. Trend forming, chop decreasing. Tighter moats may be viable.</p>
+              </div>
+              <div className="bg-blue-900/20 p-3 rounded border border-blue-700/50">
+                <span className="font-bold text-blue-400">FIRMING</span>
+                <p className="text-slate-400 mt-1">Chop is beginning to resolve. A directional move may be forming.</p>
+              </div>
+            </div>
+            <p className="text-sm text-slate-500 mt-3">The confidence percentage tells you how strong the signal is. Below 50% = noise. Above 70% = pay attention.</p>
+          </div>
+
           {/* --- INDICATORS --- */}
           <div className="bg-slate-800 border border-slate-700 rounded-lg p-8 shadow-xl">
             <h3 className="text-lg font-semibold text-slate-200 mb-4">Indicator Reference</h3>
+            <p className="text-sm text-slate-400 mb-4">The dashboard shows four indicator intensity bars (0.0 = trending, 1.0 = max chop). Here's what each measures:</p>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
               <div className="bg-slate-900/50 p-4 rounded border border-slate-700">
                 <span className="font-bold text-slate-100">EMA 9 / EMA 21</span>
-                <p className="text-slate-400 mt-1">Exponential Moving Averages. When they're far apart, the market is trending. When compressed (diff &lt; 0.1%), the market lacks conviction. Price above both = bullish bias. Below both = bearish.</p>
+                <p className="text-slate-400 mt-1">Exponential Moving Averages — smoothed price trends. When far apart, the market is trending. When compressed, no conviction. Price above both = bullish. Below both = bearish.</p>
               </div>
               <div className="bg-slate-900/50 p-4 rounded border border-slate-700">
                 <span className="font-bold text-slate-100">RSI (14)</span>
-                <p className="text-slate-400 mt-1">Relative Strength Index. Measures momentum. Stuck between 45-55 = no momentum (adds +1 to chop score). Above 60 or below 40 = directional energy present.</p>
+                <p className="text-slate-400 mt-1">Relative Strength Index. Measures momentum on a 0-100 scale. Stuck at 45-55 = dead zone (no momentum). Above 60 or below 40 = directional energy.</p>
               </div>
               <div className="bg-slate-900/50 p-4 rounded border border-slate-700">
                 <span className="font-bold text-slate-100">CHOP (14)</span>
-                <p className="text-slate-400 mt-1">Choppiness Index. Above 61.8 = choppy, range-bound market (+1 to score). Below 38.2 = strong trend. This is the most direct measure of whether price action is noisy.</p>
+                <p className="text-slate-400 mt-1">Choppiness Index. Above 61.8 = choppy, range-bound. Below 38.2 = strong trend. The most direct measure of whether price action is noisy or clean.</p>
               </div>
               <div className="bg-slate-900/50 p-4 rounded border border-slate-700">
                 <span className="font-bold text-slate-100">Efficiency Ratio (ER)</span>
-                <p className="text-slate-400 mt-1">Kaufman's ER. Measures how efficiently price moves from A to B. Below 0.20 = price is going nowhere despite moving a lot (+1 to score). Above 0.50 = clean directional movement.</p>
+                <p className="text-slate-400 mt-1">How efficiently price moves from point A to B. Below 0.20 = lots of movement but going nowhere. Above 0.50 = clean directional move.</p>
               </div>
               <div className="bg-slate-900/50 p-4 rounded border border-slate-700 md:col-span-2">
                 <span className="font-bold text-slate-100">VWAP Deviation</span>
-                <p className="text-slate-400 mt-1">Measures how far SPY has stretched from its Volume-Weighted Average Price. If deviation exceeds 0.35%, the system activates a <span className="text-amber-400 font-semibold">VWAP Elasticity Override</span>: all stop-losses are suspended for 10 minutes to let the "rubber band" snap back. This prevents getting stopped out on mean-reversion bounces.</p>
+                <p className="text-slate-400 mt-1">How far SPY has stretched from its average price. If &gt;0.35%, the system activates a <span className="text-amber-400 font-semibold">VWAP Elasticity Override</span>: stops are suspended for 10 minutes. Like a rubber band — the further it stretches, the more likely it snaps back.</p>
               </div>
             </div>
+          </div>
+
+          {/* --- CALENDAR EVENTS --- */}
+          <div className="bg-slate-800 border border-slate-700 rounded-lg p-8 shadow-xl">
+            <h3 className="text-lg font-semibold text-slate-200 mb-4">Calendar Event Awareness</h3>
+            <p className="text-sm text-slate-400 mb-4">Certain days have predictably higher volatility. The system automatically detects these and widens moats:</p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+              <div className="bg-slate-900/50 p-3 rounded border border-red-700/50">
+                <span className="font-bold text-red-400">FOMC Days (+40% moat)</span>
+                <p className="text-slate-400 mt-1">Federal Reserve interest rate decisions. Massive volatility around the 2:00 PM announcement. The most dangerous days for 0DTE.</p>
+              </div>
+              <div className="bg-slate-900/50 p-3 rounded border border-amber-700/50">
+                <span className="font-bold text-amber-400">CPI / Jobs Report (+30% moat)</span>
+                <p className="text-slate-400 mt-1">Inflation and employment data releases. Usually pre-market (8:30 AM) but volatility persists into the trading session.</p>
+              </div>
+              <div className="bg-slate-900/50 p-3 rounded border border-amber-700/50">
+                <span className="font-bold text-amber-400">Quarterly OPEX (+50% moat)</span>
+                <p className="text-slate-400 mt-1">Third Friday of Mar/Jun/Sep/Dec. Trillions in options expire. Maximum gamma pinning effects and erratic price action.</p>
+              </div>
+              <div className="bg-slate-900/50 p-3 rounded border border-slate-700">
+                <span className="font-bold text-slate-100">Monthly OPEX (+15% moat)</span>
+                <p className="text-slate-400 mt-1">Third Friday of every month. Elevated options volume and pinning effects, but less extreme than quarterly.</p>
+              </div>
+            </div>
+          </div>
+
+          {/* --- GEX (GAMMA EXPOSURE) --- */}
+          <div className="bg-slate-800 border border-slate-700 rounded-lg p-8 shadow-xl">
+            <h3 className="text-lg font-semibold text-slate-200 mb-4">Gamma Exposure (GEX)</h3>
+            <p className="text-sm text-slate-400 mb-4">GEX measures the net gamma exposure of market makers across all option strikes. It tells you whether the market is likely to <span className="text-emerald-400 font-semibold">mean-revert</span> (stay in a range) or <span className="text-red-400 font-semibold">trend</span> (break out). Data is sourced from ThetaData, refreshed every 2 minutes.</p>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm mb-4">
+              <div className="bg-emerald-900/20 p-3 rounded border border-emerald-700/50">
+                <span className="font-bold text-emerald-400">POSITIVE GEX</span>
+                <p className="text-slate-400 mt-1">Dealers are long gamma. They buy dips and sell rallies, acting as a stabilizer. Ranges hold, breakouts fade. Safer for credit spreads. Smart Moat tightened ×0.90.</p>
+              </div>
+              <div className="bg-red-900/20 p-3 rounded border border-red-700/50">
+                <span className="font-bold text-red-400">NEGATIVE GEX</span>
+                <p className="text-slate-400 mt-1">Dealers are short gamma. They sell into selloffs and buy into rallies, amplifying moves. Ranges break, trends accelerate. Wider moats needed. Smart Moat widened ×1.15.</p>
+              </div>
+              <div className="bg-slate-900/50 p-3 rounded border border-slate-700">
+                <span className="font-bold text-slate-100">NEUTRAL</span>
+                <p className="text-slate-400 mt-1">Balanced gamma. No strong directional bias from market maker hedging. Standard moat applies.</p>
+              </div>
+            </div>
+            <div className="space-y-2 text-sm">
+              <div className="bg-slate-900/50 p-3 rounded border border-slate-700">
+                <span className="font-bold text-emerald-400">Gamma Wall</span>
+                <span className="text-slate-400"> — The strike with the highest positive GEX. Acts as a price magnet — SPX tends to gravitate toward this level throughout the day.</span>
+              </div>
+              <div className="bg-slate-900/50 p-3 rounded border border-slate-700">
+                <span className="font-bold text-red-400">Put Wall</span>
+                <span className="text-slate-400"> — The strike with the most negative GEX. Acts as a support floor — strong buying pressure from dealer hedging makes it harder for SPX to break below.</span>
+              </div>
+              <div className="bg-slate-900/50 p-3 rounded border border-slate-700">
+                <span className="font-bold text-blue-400">Call Wall</span>
+                <span className="text-slate-400"> — The strike with the highest call-side GEX. Acts as a resistance ceiling — dealer selling pressure makes it harder for SPX to break above.</span>
+              </div>
+            </div>
+            <p className="text-xs text-slate-500 mt-3">GEX is integrated into Smart Moat, Position Evaluation (wall proximity warnings), and Trade Analyzer (wall proximity scoring). The backtester also fetches historical GEX per trade date.</p>
+          </div>
+
+          {/* --- TRADE HISTORY & BACKTESTER --- */}
+          <div className="bg-slate-800 border border-slate-700 rounded-lg p-8 shadow-xl">
+            <h3 className="text-lg font-semibold text-slate-200 mb-4">Trade History & Backtester</h3>
+            <p className="text-sm text-slate-400 mb-4">Upload your Robinhood CSV trade history to analyze past trades and replay them through the regime engine using historical market data.</p>
+            <div className="space-y-3 text-sm">
+              <div className="bg-slate-900/50 p-3 rounded border border-slate-700">
+                <span className="font-bold text-slate-100">Parse Trades</span>
+                <p className="text-slate-400 mt-1">Extracts credit spreads from your Robinhood CSV. Identifies STO/BTO pairs, computes P/L per spread, and shows win rate, profit factor, put/call splits, and outcome distribution.</p>
+              </div>
+              <div className="bg-slate-900/50 p-3 rounded border border-slate-700">
+                <span className="font-bold text-slate-100">Parse + Backtest</span>
+                <p className="text-slate-400 mt-1">Fetches historical SPY 5-min bars from Alpaca for each trade date and replays the full day through the regime engine. For each spread, it tracks the moat distance to your actual strikes and determines what the system would have recommended.</p>
+              </div>
+              <div className="bg-slate-900/50 p-3 rounded border border-slate-700">
+                <span className="font-bold text-emerald-400">System Verdicts</span>
+                <p className="text-slate-400 mt-1"><span className="text-emerald-400">SAFE</span> = spread stayed outside danger zones all day. <span className="text-amber-400">CAUTION</span> = warning zone entered but regime allowed holding. <span className="text-red-400">EXIT_RECOMMENDED</span> = system would have flagged exit.</p>
+              </div>
+              <div className="bg-slate-900/50 p-3 rounded border border-slate-700">
+                <span className="font-bold text-blue-400">Alignment Labels</span>
+                <p className="text-slate-400 mt-1"><span className="text-emerald-400">ALIGNED WIN</span> = system agreed, safe trade won. <span className="text-amber-400">LUCKY WIN</span> = system would have exited early, you held and won. <span className="text-red-400">SYSTEM CORRECT</span> = system flagged exit, following it would have helped. <span className="text-slate-300">BOTH WRONG</span> = system missed the danger too.</p>
+              </div>
+            </div>
+            <p className="text-xs text-slate-500 mt-3">Note: Robinhood CSV has no entry timestamps. The backtester replays the entire day and shows the full regime timeline instead of guessing when you entered.</p>
           </div>
 
           {/* --- SPX PROXY --- */}
           <div className="bg-slate-800 border border-slate-700 rounded-lg p-8 shadow-xl">
             <h3 className="text-lg font-semibold text-slate-200 mb-4">SPX Proxy Methodology</h3>
-            <p className="text-sm text-slate-300 mb-3">This system trades <span className="text-emerald-400 font-semibold">SPX 0DTE options</span> but uses <span className="text-emerald-400 font-semibold">SPY ETF</span> data from Alpaca as a proxy, since Alpaca does not provide direct SPX index data.</p>
+            <p className="text-sm text-slate-300 mb-3">This system trades <span className="text-emerald-400 font-semibold">SPX 0DTE options</span> but uses <span className="text-emerald-400 font-semibold">SPY ETF</span> data from Alpaca as a proxy, since Alpaca does not provide direct SPX index data. The live SPX price comes from Yahoo Finance.</p>
             <div className="bg-slate-900/50 p-4 rounded border border-amber-700/50 text-sm">
               <p className="text-amber-400 font-semibold mb-2">How the conversion works:</p>
-              <p className="text-slate-300">SPX Proxy = SPY Price x Multiplier (currently 10.0). This ratio drifts slightly over time due to dividends and expense ratios. A 0.1% drift at SPX ~5900 = ~5.9 points, which matters when the Gamma Trap boundary is only 10 points. The multiplier is configurable in the backend and the SPX price displayed on the dashboard comes directly from the server calculation.</p>
+              <p className="text-slate-300">SPX Proxy = SPY Price x Multiplier (~10x). This ratio drifts slightly over time. A 0.1% drift at SPX ~5900 = ~5.9 points, which matters at Gamma Trap boundaries. The multiplier is configurable in the backend.</p>
             </div>
           </div>
 
@@ -885,19 +1659,19 @@ export default function App() {
             <div className="text-sm text-slate-300 space-y-3">
               <div className="bg-slate-900/50 p-4 rounded border border-slate-700">
                 <span className="font-bold text-slate-100">Logging a position</span>
-                <p className="text-slate-400 mt-1">Select the spread type (Put Spread, Call Spread, or Iron Condor), enter the <span className="font-semibold">SPX short strike</span> price (e.g., 5850), and the credit received (e.g., 0.80). Click "Track Position". The position is saved to the database and persists across browser refreshes.</p>
+                <p className="text-slate-400 mt-1">Select the spread type (Put Spread, Call Spread, or Iron Condor), enter the <span className="font-semibold">SPX short strike</span> price (e.g., 5850), and the credit received (e.g., 0.80). Click "Track Position". The position persists across browser refreshes.</p>
               </div>
               <div className="bg-slate-900/50 p-4 rounded border border-slate-700">
                 <span className="font-bold text-slate-100">Reading the status</span>
-                <p className="text-slate-400 mt-1">Each position shows a color-coded progress bar and a message. <span className="text-emerald-400">Green = Safe</span>. <span className="text-amber-400">Amber = Warning</span>. <span className="text-red-400">Red = Eject</span>. The moat value (e.g., +45.2 pts) shows how many SPX points separate the current price from your strike.</p>
+                <p className="text-slate-400 mt-1">Each position shows a color-coded bar and message. <span className="text-emerald-400">Green = Safe</span>. <span className="text-amber-400">Amber = Warning</span>. <span className="text-red-400">Red = Eject</span>. The moat value (e.g., +45.2 pts) shows how far SPX is from your strike.</p>
               </div>
               <div className="bg-slate-900/50 p-4 rounded border border-slate-700">
                 <span className="font-bold text-slate-100">Closing a position</span>
-                <p className="text-slate-400 mt-1">After closing the position in your broker, click the red X on the position card. This removes it from active tracking. (Future update: closed trades will be logged for analytics.)</p>
+                <p className="text-slate-400 mt-1">After closing the position in your broker, click the red X on the position card to remove it from active tracking.</p>
               </div>
               <div className="bg-slate-900/50 p-4 rounded border border-slate-700">
                 <span className="font-bold text-slate-100">Iron Condor note</span>
-                <p className="text-slate-400 mt-1">Iron Condors have two short strikes. Currently, log each leg as a separate position (one Put Spread and one Call Spread) for accurate moat tracking on both sides.</p>
+                <p className="text-slate-400 mt-1">Iron Condors have two short strikes. Log each leg as a separate position (one Put Spread and one Call Spread) for accurate moat tracking on both sides.</p>
               </div>
             </div>
           </div>

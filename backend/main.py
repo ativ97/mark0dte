@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, field_validator
@@ -12,8 +12,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 logger = logging.getLogger("0DTE-QuantEngine")
 
 # Import refactored modules
-from data_fetcher import fetch_alpaca_market_data, fetch_spx_live_price
-from engine import analyze_market_regime, evaluate_positions, generate_recommendations, compute_watch_levels, compute_position_summary, compute_smart_moat, analyze_trade_proposal
+from data_fetcher import fetch_alpaca_market_data, fetch_spx_live_price, fetch_spx_day_range, fetch_vix_data, compute_expected_move, fetch_gex_data, fetch_realized_move_distribution
+from engine import analyze_market_regime, evaluate_positions, generate_recommendations, compute_watch_levels, compute_position_summary, compute_smart_moat, analyze_trade_proposal, clear_rec_state, auto_propose_positions
 from database import Base, engine as db_engine, get_db, PositionDB, ClosedPositionDB
 
 # Initialize Database tables
@@ -74,11 +74,29 @@ class SubScores(BaseModel):
     ema_intensity: float
 
 
+class IntradayWindow(BaseModel):
+    window: str
+    label: str
+    description: str
+    entry_quality: int
+    volatility_tendency: str
+    advice: str
+
+
+class MarketEvents(BaseModel):
+    events: list[str]
+    moat_multiplier: float
+    risk_level: str
+    day_of_week: str
+
+
 class TimePressure(BaseModel):
     hours_remaining: float
     time_pressure_level: str
     time_pressure_label: str
     moat_multiplier: float
+    intraday_window: IntradayWindow
+    market_events: MarketEvents
 
 
 class Momentum(BaseModel):
@@ -137,6 +155,68 @@ class SmartMoat(BaseModel):
     combined_factor: float
 
 
+class RegimeTransition(BaseModel):
+    direction: str
+    label: str
+    confidence: float
+    score_delta_30m: float
+    er_trend: str
+    chop_trend: str
+
+
+class GexLevel(BaseModel):
+    strike_spy: float
+    strike_spx: int
+    gex: float
+    call_oi: int
+    put_oi: int
+
+
+class GexData(BaseModel):
+    net_gex: float = 0
+    gex_regime: str = "UNAVAILABLE"
+    gex_regime_label: str = "GEX data unavailable"
+    gamma_wall_spy: float = 0
+    gamma_wall_spx: float = 0
+    put_wall_spy: float = 0
+    put_wall_spx: float = 0
+    call_wall_spy: float = 0
+    call_wall_spx: float = 0
+    top_levels: list[GexLevel] = []
+    total_strikes: int = 0
+    spy_price: float = 0
+    data_source: str = "unavailable"
+    expiration: str = ""
+
+
+class ExpectedMove(BaseModel):
+    vix: float | None = None
+    vix9d: float | None = None
+    effective_vol: float | None = None
+    expected_1sigma: float | None = None
+    expected_2sigma: float | None = None
+    recommended_moat: float | None = None
+    hours_remaining: float | None = None
+    explanation: str = "VIX data unavailable"
+
+
+class IntradayPL(BaseModel):
+    closed_pl: float = 0
+    open_pl: float = 0
+    total_pl: float = 0
+    closed_count: int = 0
+    open_count: int = 0
+
+
+class RealizedDistribution(BaseModel):
+    available: bool = False
+    lookback_days: int | None = None
+    exceedance: dict | None = None
+    mean_abs_move_pct: float | None = None
+    median_abs_move_pct: float | None = None
+    explanation: str = "Realized distribution unavailable"
+
+
 class TelemetryResponse(BaseModel):
     symbol: str
     current_price: float
@@ -162,11 +242,17 @@ class TelemetryResponse(BaseModel):
     time_pressure: TimePressure
     momentum: Momentum
     smart_moat_data: SmartMoat
+    expected_move: ExpectedMove
+    gex_data: GexData | None = None
+    realized_distribution: RealizedDistribution | None = None
+    regime_transition: RegimeTransition
     timestamp: str
     positions: list[EvaluatedPosition]
     recommendations: list[Recommendation]
     watch_levels: WatchLevels
     position_summary: PositionSummary | None = None
+    intraday_pl: IntradayPL | None = None
+    trade_proposals: list | None = None
 
 
 # --- API ENDPOINTS ---
@@ -183,11 +269,12 @@ def create_position(pos: PositionCreate, db: Session = Depends(get_db)):
 
 
 @app.post("/api/positions/{pos_id}/close")
-def close_position(pos_id: int, db: Session = Depends(get_db)):
+def close_position(pos_id: int, close_price: float = None, db: Session = Depends(get_db)):
     """Archives a position as closed for future analytics."""
     pos = db.query(PositionDB).filter(PositionDB.id == pos_id).first()
     if not pos:
         raise HTTPException(status_code=404, detail="Position not found")
+    realized_pl = round(pos.credit - close_price, 2) if close_price is not None else None
     closed = ClosedPositionDB(
         original_id=pos.id,
         type=pos.type,
@@ -195,12 +282,15 @@ def close_position(pos_id: int, db: Session = Depends(get_db)):
         credit=pos.credit,
         opened_at=pos.created_at,
         close_reason="manual",
+        close_price=close_price,
+        realized_pl=realized_pl,
     )
     db.add(closed)
     db.delete(pos)
     db.commit()
-    logger.info(f"Closed and archived position ID: {pos_id} ({pos.type} @ {pos.strike})")
-    return {"status": "closed", "archived_id": closed.id}
+    clear_rec_state(pos_id)
+    logger.info(f"Closed and archived position ID: {pos_id} ({pos.type} @ {pos.strike}), close_price={close_price}, P/L={realized_pl}")
+    return {"status": "closed", "archived_id": closed.id, "realized_pl": realized_pl}
 
 
 @app.delete("/api/positions/{pos_id}")
@@ -211,6 +301,7 @@ def delete_position(pos_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Position not found")
     db.delete(pos)
     db.commit()
+    clear_rec_state(pos_id)
     logger.info(f"Hard deleted position ID: {pos_id}")
     return {"status": "deleted"}
 
@@ -247,21 +338,58 @@ def get_telemetry(db: Session = Depends(get_db)):
         raise HTTPException(status_code=503, detail="Unable to determine SPX price from any source.")
     logger.info(f"SPX Price: ${spx_price:.2f} (source: {spx_source})")
 
-    # Compute SPX-equivalent day range from SPY momentum data
+    # Fetch authoritative SPX day high/low from Yahoo ^GSPC (fixes SPY-ratio drift bug)
     momentum_data = regime_data["momentum"]
     spx_spy_ratio = spx_price / live_price if live_price > 0 else 10.0
-    day_high_spx = round(momentum_data["day_high_spy"] * spx_spy_ratio, 2)
-    day_low_spx = round(momentum_data["day_low_spy"] * spx_spy_ratio, 2)
+    spx_range = fetch_spx_day_range(
+        spy_day_high=momentum_data["day_high_spy"],
+        spy_day_low=momentum_data["day_low_spy"],
+        spx_spy_ratio=spx_spy_ratio,
+    )
+    day_high_spx = spx_range["day_high_spx"] or round(momentum_data["day_high_spy"] * spx_spy_ratio, 2)
+    day_low_spx = spx_range["day_low_spx"] or round(momentum_data["day_low_spy"] * spx_spy_ratio, 2)
     range_position = momentum_data["range_position"]
+    logger.info(f"SPX Day Range: High={day_high_spx}, Low={day_low_spx} (source: {spx_range['source']})")
 
-    # Phase 4: Smart Moat — adjusts base moat using range, signal, time, exhaustion
+    # Phase 7: Fetch VIX data for expected move calculation
+    vix_data = fetch_vix_data()
+    hours_remaining = regime_data["time_pressure"]["hours_remaining"]
+    expected_move_data = None
+    vix_based_moat = None
+    if vix_data["vix"] is not None:
+        expected_move_data = compute_expected_move(
+            spx_price, vix_data["vix"], vix_data.get("vix9d"),
+            hours_remaining=hours_remaining,
+        )
+        vix_based_moat = expected_move_data["recommended_moat"]
+        logger.info(f"VIX Expected Move: {expected_move_data['explanation']}")
+
+    # Phase 11: Fetch realized daily move distribution (cached per day)
+    realized_dist = fetch_realized_move_distribution()
+
+    # Phase 9: Fetch GEX data from ThetaData (moved early so it feeds into smart moat)
+    gex_data = None
+    try:
+        gex_raw = fetch_gex_data(spy_price=live_price, spx_spy_ratio=spx_spy_ratio)
+        if gex_raw and gex_raw.get("gex_regime") != "UNAVAILABLE":
+            gex_data = gex_raw
+            logger.info(f"GEX: {gex_raw['gex_regime']} — net {gex_raw['net_gex']:,.0f}, "
+                        f"gamma wall SPX {gex_raw['gamma_wall_spx']}, "
+                        f"put wall SPX {gex_raw['put_wall_spx']}")
+    except Exception as e:
+        logger.warning(f"GEX fetch skipped: {e}")
+
+    # Phase 4: Smart Moat — adjusts base moat using range, signal, time, exhaustion, GEX
+    # If VIX data available, use VIX-based moat as override for the base moat
     smart_moat_data = compute_smart_moat(
         regime_data, spx_price, day_high_spx, day_low_spx, range_position,
+        vix_based_moat=vix_based_moat,
+        gex_data=gex_data,
     )
     smart_moat = smart_moat_data["smart_moat"]
     logger.info(f"Smart Moat: {smart_moat_data['moat_explanation']}")
 
-    # Run Phase 3.2 Enhanced Position Intelligence with SMART moat
+    # Run Phase 3.2 Enhanced Position Intelligence with SMART moat + GEX
     db_positions = db.query(PositionDB).all()
     evaluated_positions = evaluate_positions(
         db_positions, spx_price, db,
@@ -274,6 +402,7 @@ def get_telemetry(db: Session = Depends(get_db)):
         hours_remaining=regime_data["time_pressure"]["hours_remaining"],
         momentum_label=momentum_data.get("momentum_label", ""),
         vwap_dev=regime_data.get("vwap_dev", 0.0),
+        gex_data=gex_data,
     )
 
     # Generate actionable recommendations
@@ -296,7 +425,34 @@ def get_telemetry(db: Session = Depends(get_db)):
         evaluated_positions, spx_price, smart_moat,
     )
 
-    logger.info(f"Telemetry formulated. Tracking {len(evaluated_positions)} positions. {len(recommendations)} recommendations.")
+    # Phase 14: Intraday P/L dashboard — aggregate open + closed P/L
+    today_start = datetime.datetime.now(datetime.timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    todays_closed = db.query(ClosedPositionDB).filter(ClosedPositionDB.closed_at >= today_start).all()
+    closed_pl = sum(c.realized_pl for c in todays_closed if c.realized_pl is not None)
+    open_pl = sum(p.get("estimated_pl", 0) for p in evaluated_positions)
+    intraday_pl = {
+        "closed_pl": round(closed_pl, 2),
+        "open_pl": round(open_pl, 2),
+        "total_pl": round(closed_pl + open_pl, 2),
+        "closed_count": len(todays_closed),
+        "open_count": len(evaluated_positions),
+    }
+
+    # Phase 15: Auto-propose new positions when moat allows
+    trade_proposals = auto_propose_positions(
+        spx_price=spx_price,
+        regime_data=regime_data,
+        smart_moat=smart_moat,
+        day_high_spx=day_high_spx,
+        day_low_spx=day_low_spx,
+        range_position=range_position,
+        existing_positions=evaluated_positions,
+        momentum_label=regime_data["momentum"]["momentum_label"],
+        vwap_dev=regime_data.get("vwap_dev", 0),
+        gex_data=gex_data,
+    )
+
+    logger.info(f"Telemetry formulated. Tracking {len(evaluated_positions)} positions. {len(recommendations)} recommendations. Day P/L: ${intraday_pl['total_pl']}. {len(trade_proposals)} proposals.")
     return TelemetryResponse(
         symbol="SPY [Alpaca V2]",
         current_price=round(live_price, 2),
@@ -322,11 +478,17 @@ def get_telemetry(db: Session = Depends(get_db)):
         time_pressure=regime_data["time_pressure"],
         momentum=regime_data["momentum"],
         smart_moat_data=smart_moat_data,
+        expected_move=expected_move_data or {"explanation": "VIX data unavailable"},
+        gex_data=gex_data,
+        realized_distribution=realized_dist if realized_dist.get("available") else None,
+        regime_transition=regime_data["regime_transition"],
         timestamp=datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
         positions=evaluated_positions,
         recommendations=recommendations,
         watch_levels=watch_levels,
         position_summary=position_summary,
+        intraday_pl=intraday_pl,
+        trade_proposals=trade_proposals if trade_proposals else None,
     )
 
 
@@ -382,12 +544,27 @@ def analyze_trade(proposal: TradeProposal, db: Session = Depends(get_db)):
 
     momentum_data = regime_data["momentum"]
     spx_spy_ratio = spx_price / live_price if live_price > 0 else 10.0
-    day_high_spx = round(momentum_data["day_high_spy"] * spx_spy_ratio, 2)
-    day_low_spx = round(momentum_data["day_low_spy"] * spx_spy_ratio, 2)
+    spx_range = fetch_spx_day_range(
+        spy_day_high=momentum_data["day_high_spy"],
+        spy_day_low=momentum_data["day_low_spy"],
+        spx_spy_ratio=spx_spy_ratio,
+    )
+    day_high_spx = spx_range["day_high_spx"] or round(momentum_data["day_high_spy"] * spx_spy_ratio, 2)
+    day_low_spx = spx_range["day_low_spx"] or round(momentum_data["day_low_spy"] * spx_spy_ratio, 2)
     range_position = momentum_data["range_position"]
+
+    # Fetch GEX for trade analysis
+    gex_data = None
+    try:
+        gex_raw = fetch_gex_data(spy_price=live_price, spx_spy_ratio=spx_spy_ratio)
+        if gex_raw and gex_raw.get("gex_regime") != "UNAVAILABLE":
+            gex_data = gex_raw
+    except Exception:
+        pass
 
     smart_moat_data = compute_smart_moat(
         regime_data, spx_price, day_high_spx, day_low_spx, range_position,
+        gex_data=gex_data,
     )
     smart_moat = smart_moat_data["smart_moat"]
 
@@ -411,10 +588,75 @@ def analyze_trade(proposal: TradeProposal, db: Session = Depends(get_db)):
         existing_positions=existing_positions,
         momentum_label=momentum_data.get("momentum_label", ""),
         vwap_dev=regime_data.get("vwap_dev", 0.0),
+        gex_data=gex_data,
     )
 
     logger.info(f"Trade analysis: {result['verdict']} (score {result['score']})")
     return result
+
+
+# --- TRADE HISTORY & BACKTEST ENDPOINTS ---
+
+@app.post("/api/trade-history/upload")
+async def upload_trade_history(file: UploadFile = File(...)):
+    """
+    Upload a Robinhood CSV export. Parses credit spreads and returns
+    trade stats + individual spread details.
+    """
+    from trade_history import analyze_trade_history
+
+    content = await file.read()
+    csv_text = content.decode("utf-8", errors="ignore")
+    logger.info(f"Trade history upload: {file.filename} ({len(csv_text)} bytes)")
+
+    result = analyze_trade_history(csv_text)
+    if result.get("error") and not result.get("spreads"):
+        raise HTTPException(status_code=400, detail=result["error"])
+
+    return result
+
+
+@app.post("/api/trade-history/backtest")
+async def backtest_trade_history(file: UploadFile = File(...)):
+    """
+    Upload a Robinhood CSV and replay each trade date through the regime engine
+    using historical Alpaca 5-min bars. Returns per-day regime analysis showing
+    what the system would have recommended for the user's actual strikes.
+    """
+    from trade_history import parse_csv, identify_spreads, compute_trade_stats
+    from backtester import run_backtest
+
+    content = await file.read()
+    csv_text = content.decode("utf-8", errors="ignore")
+    logger.info(f"Backtest upload: {file.filename} ({len(csv_text)} bytes)")
+
+    transactions = parse_csv(csv_text)
+    if not transactions:
+        raise HTTPException(status_code=400, detail="No option transactions found in CSV")
+
+    spreads = identify_spreads(transactions)
+    if not spreads:
+        raise HTTPException(status_code=400, detail="No credit spreads identified in CSV")
+
+    trade_stats = compute_trade_stats(spreads)
+
+    # Use live SPX/SPY ratio or default
+    spx_spy_ratio = 10.0
+    try:
+        from data_fetcher import get_spx_spy_ratio
+        ratio_info = get_spx_spy_ratio()
+        spx_spy_ratio = ratio_info["ratio"]
+    except Exception:
+        pass
+
+    logger.info(f"Running backtest on {len(spreads)} spreads across {len(set(s['iso_date'] for s in spreads))} dates")
+    backtest_result = run_backtest(spreads, spx_spy_ratio=spx_spy_ratio)
+
+    return {
+        "trade_stats": trade_stats,
+        "backtest": backtest_result,
+        "spreads_parsed": len(spreads),
+    }
 
 
 if __name__ == "__main__":

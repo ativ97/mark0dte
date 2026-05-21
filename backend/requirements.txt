@@ -6,4 +6,8 @@ pydantic
 requests
 sqlalchemy
 python-dotenv
+python-multipart
+scipy
+thetadata
+pyarrow
 https://github.com/xgboosted/pandas-ta-classic/archive/refs/heads/main.zip

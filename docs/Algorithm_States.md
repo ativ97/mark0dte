@@ -1,12 +1,12 @@
 # 0DTE Algorithmic Decision Support System
 
-**System Architecture & State Rules - Version 3.0 (Advanced Risk Protocols)**
+**System Architecture & State Rules - Version 5.5**
 
 ## 1. Core Philosophy
 
-The objective of this algorithm is to act as a **Human-in-the-Loop Regime Classifier**. It ingests live market telemetry (Alpaca Real-Time SPY data) to determine the current operational environment (State) and outputs dynamic structural constraints (Moat Width, Stop-Loss Limits) to protect short premium positions. The system trades **SPX 0DTE options** using SPY as a data proxy.
+The objective of this algorithm is to act as a **Human-in-the-Loop Regime Classifier**. It ingests live market telemetry (Alpaca Real-Time SPY data + Yahoo Finance VIX/SPX) to determine the current operational environment (State) and outputs dynamic structural constraints (Moat Width, Stop-Loss Limits) to protect short premium positions. The system trades **SPX 0DTE options** using SPY as a data proxy.
 
-Version 3.0 introduces **Persistent State Management**, **Server-Side Risk Evaluation**, **Regime-Aware Tiered Stops**, and **Time-Delayed Verification** to defeat whipsaw stop-outs.
+Version 5.5 adds **Advanced Position Intelligence**: realized daily move distribution, cumulative drift tracker, position premium history, intraday P/L dashboard, auto-proposed trade candidates, moat zone hysteresis, and graduated exit escalation. Version 5.0 introduced **GEX (Gamma Exposure) Integration**, **Trade History Analysis & Backtesting**, and extends V4.0 features: **VIX-Based Expected Move Moats**, **Time-Aware Exit Strategies**, **Intraday Window Classification**, **Regime Transition Prediction**, and **Calendar Event Awareness**.
 
 ## 2. Telemetry Ingestion (The Ensemble Matrix)
 
@@ -100,33 +100,284 @@ If SPX has tested both extremes of the day's range (> 15 pts from each) and retu
 ### 7.5 Smart Moat Floor
 The smart moat never drops below `WARNING_ZONE_THRESHOLD + 5` (30 pts) to preserve minimum safety margin.
 
-## 8. System Modification Log
+## 8. Phase 6: Time-Aware Exit Strategies
 
-* **[V4.0] Phase 4 - Smart Moat System:**
+When positions enter the Warning Zone, exit behavior adapts to time remaining until close:
+
+* **Final 30 min (3:30-4:00 PM):** `HOLD_FOR_EXPIRY` — only exit if strike is actually breached. Premium spikes are ignored. Theta is nuclear at this point.
+* **Final hour (3:00-3:30 PM):** `HOLD_WITH_TRIGGER` — premium stops suspended. Require 10-minute sustained asset breach before exiting.
+* **1-2 hours left (2:00-3:00 PM):** `CLOSE_SOON` — widened 250% stop with 5-minute verification. Filters out afternoon whipsaws.
+* **> 2 hours left:** Standard regime-based stops (A/B/C rules).
+* **State C always uses aggressive asset-boundary stops** regardless of time.
+
+## 9. Phase 7: VIX-Based Expected Move
+
+The Smart Moat base is now derived from VIX math instead of static State A/B/C tables:
+
+**Formula:** `Expected Move = SPX × (VIX / 100) × sqrt(hours_remaining / 1638)`
+
+Where 1638 = trading hours per year (252 days × 6.5 hours).
+
+* `VIX` and `VIX9D` (9-day VIX, preferred for 0DTE) fetched from Yahoo Finance with 120-second cache.
+* If VIX9D is unavailable, system uses `VIX × 0.85` as a proxy.
+* Returns: **1-sigma** (68% range), **2-sigma** (95% range), and **recommended moat** (1.5σ).
+* The recommended moat overrides the static State A/B/C base moat in `compute_smart_moat()`.
+* All Smart Moat adjustment factors (range, signal, time, exhaustion, events) still apply on top.
+
+## 10. Phase 8: Intraday Window Classification & Regime Transition
+
+### 10.1 Trading Windows
+`_classify_intraday_window()` classifies the current time into known behavioral periods:
+
+| Window | Time (ET) | Entry Quality | Volatility |
+|---|---|---|---|
+| Opening Drive | 9:30-10:00 | 20/100 | ELEVATED |
+| Trend Establishment | 10:00-11:30 | 90/100 | MODERATE |
+| Lunch Lull | 11:30-1:00 | 65/100 | LOW |
+| Afternoon Session | 1:00-2:30 | 55/100 | MODERATE |
+| Pre-Power Hour | 2:30-3:00 | 25/100 | RISING |
+| Power Hour | 3:00-3:45 | 10/100 | HIGH |
+| Final Minutes | 3:45-4:00 | 0/100 | EXTREME_THETA |
+
+### 10.2 Regime Transition Prediction
+`_compute_regime_transition()` compares sub-scores (CHOP, ER, RSI, EMA intensities) now vs 30 minutes ago (6 bars):
+
+* **DETERIORATING** (Δ > +0.5): Chop increasing rapidly. Widen moats.
+* **SOFTENING** (Δ > +0.2): Trend weakening. Monitor.
+* **STABLE** (-0.2 to +0.2): No transition imminent.
+* **FIRMING** (Δ < -0.2): Chop resolving. Direction forming.
+* **IMPROVING** (Δ < -0.5): Strong trend returning. Tighter moats viable.
+
+Also tracks individual ER and CHOP rate-of-change with confidence scores.
+
+## 11. Phase 10: Calendar Event Awareness
+
+`_check_market_events()` identifies high-volatility days and applies moat multipliers:
+
+| Event | Multiplier | Risk Level |
+|---|---|---|
+| FOMC Meeting Day | ×1.40 | ELEVATED |
+| CPI Release Window | ×1.30 | ELEVATED |
+| NFP (First Friday) | ×1.30 | ELEVATED |
+| Monthly OPEX (3rd Fri) | ×1.15 | MODERATE |
+| Quarterly OPEX (3rd Fri Mar/Jun/Sep/Dec) | ×1.50 | HIGH |
+| Monday gap risk | ×1.10 | NORMAL |
+
+The event multiplier is integrated as the 5th factor in `compute_smart_moat()`:
+`combined = range × signal × time × exhaustion × event`
+
+FOMC 2026 dates are hardcoded. CPI/NFP use heuristic date ranges (10th-15th Tue/Wed, 1st Friday).
+
+## 12. Phase 9: GEX (Gamma Exposure) Integration
+
+### 12.1 Data Source
+Real-time and historical options chain data from **ThetaData** (Standard subscription). The system fetches SPY 0DTE first-order greeks (delta, IV) and open interest, then computes gamma via Black-Scholes:
+
+`gamma = N'(d1) / (S × σ × √T)` where `d1 = [ln(S/K) + (r + 0.5σ²)T] / (σ√T)`
+
+Second-order greeks (gamma directly) require the Professional tier ($200+/month), so the Standard subscription uses manual BS computation from IV.
+
+### 12.2 GEX Calculation
+Per-strike GEX: `gamma × OI × 100 × spot`. Calls contribute positive GEX (dealers short calls → long gamma), puts contribute negative GEX (dealers short puts → short gamma).
+
+### 12.3 Key Levels
+* **Gamma Wall** (highest positive GEX strike): Acts as a price magnet — SPX tends to gravitate toward this level.
+* **Put Wall** (most negative GEX strike): Acts as a floor / support level.
+* **Call Wall** (highest call-side GEX strike): Acts as a ceiling / resistance level.
+
+### 12.4 GEX Regime Classification
+* **POSITIVE** (net GEX > 0): Dealers are long gamma → mean-reverting environment. Ranges hold, breakouts fade. Safer for credit spreads.
+* **NEGATIVE** (net GEX < -50k): Dealers are short gamma → trending/volatile. Moves accelerate, ranges break. Wider moats needed.
+* **NEUTRAL**: Balanced gamma exposure.
+
+### 12.5 GEX as 6th Smart Moat Factor
+The GEX regime is integrated into `compute_smart_moat()` as the 6th multiplicative factor:
+`combined = range × signal × time × exhaustion × event × gex`
+
+| GEX Regime | Factor | Rationale |
+|---|---|---|
+| POSITIVE | ×0.90 | Mean-reverting, tighter moat OK |
+| NEUTRAL | ×1.00 | No adjustment |
+| NEGATIVE | ×1.15 | Trending/volatile, widen moat |
+
+### 12.6 GEX in Position Evaluation
+`evaluate_positions()` appends GEX wall proximity context to position messages:
+* Put spreads: checks distance to put wall (support) and gamma wall magnet effect.
+* Call spreads: checks distance to call wall (resistance) and gamma wall magnet effect.
+* Warns when strikes are at/beyond their protective wall.
+
+### 12.7 GEX in Pre-Trade Analysis
+`analyze_trade_proposal()` adds a GEX scoring component (§9):
+* **Bonus** (up to +8 pts): Strike is safely beyond its protective wall.
+* **Penalty** (up to -6 pts): Strike at/beyond wall + negative GEX regime.
+* Positive GEX regime adds +3 bonus; negative GEX adds -3 penalty.
+
+### 12.8 Cache & Refresh
+GEX data is cached for **2 minutes** (reduced from 5 min) for more responsive wall tracking during fast moves. Falls back to stale cache on failure.
+
+## 13. Phase 12: Trade History & Backtester
+
+### 13.1 Trade History Parser (`trade_history.py`)
+* `parse_csv()`: Parses Robinhood brokerage CSV exports, handles multi-line CUSIP fields, filters to SPXW/SPY option transactions.
+* `identify_spreads()`: Greedy quantity-matched, width-filtered pairing of STO/BTO legs. Max width: 15pt SPXW, 5pt SPY.
+* `compute_trade_stats()`: Win rate, P/L, profit factor, put/call splits, outcome distribution, best/worst trade.
+
+### 13.2 Backtester (`backtester.py`)
+* `fetch_historical_bars(symbol, date)`: Alpaca intraday bars for specific date.
+* `replay_trade_day(df, spreads, ratio, gex_data)`: Replays full day through regime engine bar-by-bar, tracks moat to user's actual strikes.
+* **Historical GEX**: For each trade date, the backtester fetches historical options data from ThetaData (8 years of history) and includes GEX regime/walls in the day summary.
+* **System Verdicts**: SAFE / CAUTION / EXIT_RECOMMENDED per spread.
+* **Alignment Labels**: ALIGNED_WIN / SYSTEM_CORRECT / LUCKY_WIN / BOTH_WRONG — compares user outcome vs system recommendation.
+* **Time Workaround**: Robinhood CSV has no entry timestamps; the engine replays the entire day.
+
+### 13.3 API Endpoints
+* `POST /api/trade-history/upload`: Parse-only, returns stats + spreads.
+* `POST /api/trade-history/backtest`: Parse + replay all dates through regime engine with historical GEX.
+
+## 14. Phase 11: Realized Daily Move Distribution
+
+`fetch_realized_move_distribution()` in `data_fetcher.py` fetches the last 120 trading days of ^GSPC daily closes from Yahoo Finance and computes:
+
+* **Exceedance percentages**: What fraction of days saw moves ≥ ±0.5%, ±1.0%, ±1.5%, ±2.0%.
+* **Mean absolute move %**: Average daily |%change|.
+* **Median absolute move %**: Median daily |%change|.
+
+Data is cached once per calendar day (TTL: midnight rollover). Displayed in the "VIX Expected Move" panel as a "Reality Check" against the VIX-implied expected move.
+
+## 15. Phase 12b: Cumulative Drift Tracker
+
+`_update_drift_tracker()` records SPX price at each telemetry refresh (30s). `compute_drift_toward_strike()` computes the net directional movement over a rolling 90-minute window.
+
+* **Window**: 90 minutes (`DRIFT_WINDOW_MINUTES`)
+* **Alert threshold**: 10 SPX points (`DRIFT_ALERT_THRESHOLD_PTS`)
+* If SPX has drifted ≥ 10 pts toward a position's strike over the window, a `drift_alert` is attached to that position.
+* Displayed as an orange "↗ DRIFT +Xpts" badge on position cards.
+* Generates a `DRIFT_WARNING` recommendation in `generate_recommendations()` when triggered.
+
+**Purpose**: Detects slow, steady price movement that doesn't trigger zone changes but still erodes safety over time.
+
+## 16. Phase 13: Position Premium History
+
+`_update_premium_history()` stores the last 10 estimated buyback values per position with timestamps.
+
+* **Max readings**: 10 (`PREMIUM_HISTORY_MAX`)
+* **Trend detection**: Compares last 3+ readings to classify as:
+  * `RISING` — buyback cost increasing (position deteriorating)
+  * `FALLING` — buyback cost decreasing (position improving / theta working)
+  * `STABLE` — minimal change
+  * `VOLATILE` — inconsistent swings
+* Returns min, max, average, and full value history.
+* Displayed below exit strategy on position cards.
+
+## 17. Phase 14: Intraday P/L Dashboard
+
+Aggregates realized + unrealized P/L across all positions for the current trading day:
+
+* **Closed P/L**: Sum of `realized_pl` from `ClosedPositionDB` records closed today. `realized_pl = credit - close_price`.
+* **Open P/L**: Sum of `estimated_pl` from all currently evaluated open positions.
+* **Total P/L**: `closed_pl + open_pl`.
+
+`ClosedPositionDB` schema extended with `close_price` (Float, nullable) and `realized_pl` (Float, nullable). The `/api/positions/{id}/close` endpoint accepts an optional `close_price` query parameter to compute P/L on archival.
+
+Displayed as a color-coded "Day P/L" banner above the position summary in the frontend.
+
+## 18. Phase 15: Auto-Propose New Positions
+
+`auto_propose_positions()` in `engine.py` generates candidate credit spread entries:
+
+* **Candidate generation**: 3 strikes per side (Put Spread + Call Spread) at 1×, 1.25×, 1.5× the current smart moat, rounded to nearest 5-pt SPX increment.
+* **Credit estimation**: Rough model based on moat distance and hours remaining. Rejects candidates with estimated credit < $0.15.
+* **Scoring**: Each candidate is passed through `analyze_trade_proposal()` and scored 0-100.
+* **Filtering**: Only STRONG_ENTRY and ACCEPTABLE verdicts are returned. Top 4 by score.
+* **Suppression**: No proposals when < 1 hour until market close.
+
+Displayed as "Trade Ideas" cards in the frontend with score, verdict, estimated credit, moat, and key reasons.
+
+## 19. Phase 16: Threshold Hysteresis for Moat Transitions
+
+`_apply_moat_hysteresis()` prevents rapid zone oscillation when price hovers near a boundary:
+
+* **Per-position tracking**: `_moat_zone_state` dict tracks the current zone for each position ID.
+* **Entry threshold**: Standard (e.g., moat drops to 25 → enters WARNING).
+* **Exit threshold**: Standard + 15% buffer (`HYSTERESIS_BUFFER_PCT = 0.15`). E.g., must rise above 25 × 1.15 ≈ 29 pts to exit WARNING.
+* **Direction-aware**: Worsening transitions use raw thresholds; improving transitions require the buffer.
+
+Zones: `SAFE → CAUTION → WARNING → GAMMA_TRAP`.
+
+## 20. Phase 17: Graduated CRITICAL EJECT Levels
+
+`_get_escalation_level()` implements time-based escalation through danger levels:
+
+* **Escalation chain**: `CAUTION → WARNING → CLOSE_RECOMMENDED → URGENT_CLOSE → CRITICAL_EJECT`
+* **Minimum hold time**: 3 minutes (`ESCALATION_MIN_HOLD_MINUTES`) at each level before escalating.
+* **Entry**: Position enters danger zone (moat ≤ WARNING_ZONE_THRESHOLD) → starts at CAUTION.
+* **Escalation**: Each 3 minutes of sustained danger → advance one level.
+* **De-escalation buffer**: Positions at CLOSE_RECOMMENDED or higher that recover drop to WARNING (not SAFE) for one cycle.
+* **Bypass**: Strike breach (moat ≤ 0) immediately triggers CRITICAL_EJECT regardless of escalation state.
+
+The escalation level is included in exit strategy output and displayed as a colored badge in the frontend:
+* Amber = CLOSE_RECOMMENDED
+* Dark red = URGENT_CLOSE
+* Bright red = CRITICAL_EJECT
+
+State is cleared per-position on close and globally on market close via `clear_rec_state()`.
+
+## 21. System Modification Log
+
+* **[V5.5] Phases 11-17 — Advanced Position Intelligence:**
+  - Phase 11: Realized daily move distribution from 120 days of ^GSPC closes. Cached daily. "Reality Check" display.
+  - Phase 12b: Cumulative drift tracker — 90-min rolling SPX drift toward strikes. Orange badge + recommendation.
+  - Phase 13: Position premium history — last 10 buyback readings with RISING/FALLING/STABLE/VOLATILE trend.
+  - Phase 14: Intraday P/L dashboard — closed_pl + open_pl aggregation. ClosedPositionDB extended with close_price/realized_pl.
+  - Phase 15: Auto-propose positions — 6 candidates (3 per side), scored via analyze_trade_proposal, top 4 ACCEPTABLE+ shown.
+  - Phase 16: Moat zone hysteresis — 15% exit buffer prevents WARNING/CAUTION flip-flopping.
+  - Phase 17: Graduated exit escalation — CAUTION→WARNING→CLOSE_RECOMMENDED→URGENT_CLOSE→CRITICAL_EJECT with 3-min holds.
+  - Frontend: Day P/L banner, drift badges, premium trend, trade ideas panel, escalation level badges.
+  - Pydantic schemas: IntradayPL, trade_proposals added to TelemetryResponse.
+  - test_positions.py: setUp now calls clear_rec_state() to isolate hysteresis/escalation between tests.
+  - Comprehensive User Manual created: `docs/User_Manual.md`.
+  - 29 unit tests retained and passing.
+* **[V5.0] Phases 9, 12 — GEX Integration & Trade History:**
+  - Phase 9: ThetaData real-time GEX integration. BS-gamma computation from IV + OI.
+  - GEX as 6th factor in `compute_smart_moat()` (×0.90 positive, ×1.15 negative).
+  - GEX wall proximity in `evaluate_positions()` — put wall support, call wall resistance, gamma wall magnet.
+  - GEX scoring in `analyze_trade_proposal()` — wall proximity bonus/penalty + regime bonus/penalty.
+  - GEX cache reduced to 2 minutes for real-time wall updates.
+  - Historical GEX in backtester via `fetch_historical_gex()` — ThetaData 8-year options history.
+  - Trade History: Robinhood CSV parser, credit spread identification, P/L computation.
+  - Backtester: Full-day regime replay with historical Alpaca bars + GEX context.
+  - Frontend: GEX panel in dashboard sidebar. Trade History tab with upload, stats, backtest results.
+  - Pydantic schemas: GexData, GexLevel added to TelemetryResponse.
+  - System Manual updated with GEX and Trade History sections.
+  - 29 unit tests retained and passing.
+* **[V4.0] Phases 6-10:**
+  - Phase 6: Time-aware exit strategies with 4 time tiers in Warning Zone.
+  - Phase 7: VIX/VIX9D fetching from Yahoo Finance. Math-grounded expected move moat replaces static regime tables.
+  - Phase 8a: Intraday window classification with entry quality scores.
+  - Phase 8b: Regime transition prediction via sub-score rate-of-change (30-min delta).
+  - Phase 10: Calendar event awareness (FOMC, CPI, NFP, OPEX) with auto-widened moats.
+  - Frontend: VIX Expected Move panel, Regime Transition panel, Trading Window panel, Calendar Events alert.
+  - System Manual rewritten with beginner-friendly explanations of all features.
+  - Pydantic schemas: IntradayWindow, MarketEvents, RegimeTransition, ExpectedMove added.
+  - 29 unit tests retained and passing.
+* **[V3.5] Phase 4 - Smart Moat System:**
   - `compute_smart_moat()` adjusts base moat using range context, signal quality, time decay, and range exhaustion.
   - Range context: TIGHT / CONTAINED / NORMAL / EXPANDING based on day's SPX range.
   - Signal quality: DEAD / NOISE / WEAK / DIRECTIONAL based on ER + continuous score.
   - Time-decay survival credit: graduated moat reduction as expiry approaches.
   - Range exhaustion detection: identifies established ranges with lower breakout probability.
-  - Recommendation engine refactored: removed redundant indicator/day-range watches (surfaced in UI), time-aware deployment zones, situational alerts.
+  - Recommendation engine refactored: time-aware deployment zones, situational alerts.
   - Position summary (iron condor view) with safe corridor, risk tilt, aggregate P/L.
-  - P/L estimation per position using moat, time decay, and zone classification.
   - Watch levels simplified to one ceiling + one floor with day-extreme context.
-  - Frontend: Smart Moat panel with tagged badges, position sort by strike, upper/lower bound labels.
   - 29 unit tests retained and passing.
 * **[V3.0] Phase 3 - Advanced Risk Protocols:**
-  - Migrated position state from browser `useState` to SQLite persistent database.
+  - Migrated position state to SQLite persistent database.
   - Server-side `evaluate_positions` engine with regime-aware tiered stop rules.
-  - Time-Delayed Verification stops with configurable `BREACH_VERIFICATION_MINUTES`.
+  - Time-Delayed Verification stops with `BREACH_VERIFICATION_MINUTES`.
   - Whipsaw Immunity: breach timer auto-clears on price recovery.
-  - All engine thresholds centralized in `config.py` and consumed by `engine.py`.
-  - API keys moved to `.env` file (removed from source code).
-  - VWAP column collision resolved (`VWAP_BAR` vs cumulative `VWAP`).
-  - SPX proxy multiplier made configurable (`SPX_PROXY_MULTIPLIER`).
-  - Input validation on position creation (type enum, positive strike/credit).
-  - Deprecated `datetime.utcnow()` replaced with `datetime.now(timezone.utc)`.
-  - Frontend polling reduced from 60s to 30s.
-  - Unit tests added for position evaluator (15 test cases covering all zones and edge cases).
-* **[V2.0] Phase 2 - Smart Ledger:** Migrated data ingestion to Alpaca real-time API. Deployed dynamic UI contract moat tracking and Gamma-Trap boundary rules.
-* **[V1.2]:** Added VWAP Elasticity "Rubber Band" override.
-* **[V1.1]:** Upgraded to Multi-Factor Ensemble Model (CHOP, ER, RSI, EMA).
+  - All thresholds centralized in `config.py`.
+  - API keys moved to `.env`.
+  - 29 unit tests covering all zones and edge cases.
+* **[V2.0] Phase 2 - Smart Ledger:** Alpaca real-time API. Dynamic moat tracking and Gamma-Trap boundaries.
+* **[V1.2]:** VWAP Elasticity "Rubber Band" override.
+* **[V1.1]:** Multi-Factor Ensemble Model (CHOP, ER, RSI, EMA).

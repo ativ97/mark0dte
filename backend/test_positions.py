@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from engine import evaluate_positions
+from engine import evaluate_positions, clear_rec_state
 from config import (
     GAMMA_TRAP_THRESHOLD,
     WARNING_ZONE_THRESHOLD, BREACH_VERIFICATION_MINUTES,
@@ -27,6 +27,7 @@ class MockPosition:
 class TestEvaluatePositions(unittest.TestCase):
 
     def setUp(self):
+        clear_rec_state()  # Reset all per-position state between tests
         self.mock_db = MagicMock()
 
     # --- SAFE ZONE TESTS ---
