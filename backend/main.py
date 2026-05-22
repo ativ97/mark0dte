@@ -15,6 +15,7 @@ logger = logging.getLogger("0DTE-QuantEngine")
 from data_fetcher import fetch_alpaca_market_data, fetch_spx_live_price, fetch_spx_day_range, fetch_vix_data, compute_expected_move, fetch_gex_data, fetch_realized_move_distribution
 from engine import analyze_market_regime, evaluate_positions, generate_recommendations, compute_watch_levels, compute_position_summary, compute_smart_moat, analyze_trade_proposal, clear_rec_state, auto_propose_positions
 from database import Base, engine as db_engine, get_db, PositionDB, ClosedPositionDB
+from accuracy_tracker import log_recommendation, resolve_position, clear_position_state, get_accuracy_stats, get_signal_log
 
 # Initialize Database tables
 Base.metadata.create_all(bind=db_engine)
@@ -253,6 +254,7 @@ class TelemetryResponse(BaseModel):
     position_summary: PositionSummary | None = None
     intraday_pl: IntradayPL | None = None
     trade_proposals: list | None = None
+    accuracy_stats: dict | None = None
 
 
 # --- API ENDPOINTS ---
@@ -275,6 +277,7 @@ def close_position(pos_id: int, close_price: float = None, db: Session = Depends
     if not pos:
         raise HTTPException(status_code=404, detail="Position not found")
     realized_pl = round(pos.credit - close_price, 2) if close_price is not None else None
+    won = realized_pl is not None and realized_pl >= 0
     closed = ClosedPositionDB(
         original_id=pos.id,
         type=pos.type,
@@ -289,6 +292,7 @@ def close_position(pos_id: int, close_price: float = None, db: Session = Depends
     db.delete(pos)
     db.commit()
     clear_rec_state(pos_id)
+    resolve_position(pos_id, won=won, realized_pl=realized_pl, close_reason="manual")
     logger.info(f"Closed and archived position ID: {pos_id} ({pos.type} @ {pos.strike}), close_price={close_price}, P/L={realized_pl}")
     return {"status": "closed", "archived_id": closed.id, "realized_pl": realized_pl}
 
@@ -302,6 +306,7 @@ def delete_position(pos_id: int, db: Session = Depends(get_db)):
     db.delete(pos)
     db.commit()
     clear_rec_state(pos_id)
+    clear_position_state(pos_id)
     logger.info(f"Hard deleted position ID: {pos_id}")
     return {"status": "deleted"}
 
@@ -405,6 +410,20 @@ def get_telemetry(db: Session = Depends(get_db)):
         gex_data=gex_data,
     )
 
+    # Log recommendations to accuracy tracker
+    for ep in evaluated_positions:
+        exit_strat = ep.get("exit_strategy", {})
+        log_recommendation(
+            pos_id=ep["id"],
+            pos_type=ep["type"],
+            strike=ep["strike"],
+            credit=ep["credit"],
+            action=exit_strat.get("action", "UNKNOWN"),
+            regime_score=regime_data["regime_score"],
+            moat=ep.get("moat", 0),
+            escalation=exit_strat.get("escalation_level"),
+        )
+
     # Generate actionable recommendations
     # Pass rsi_14 and er_value into regime_data so recommender can reference them
     regime_data["rsi_14"] = round(df.iloc[-1]['RSI_14'], 2)
@@ -489,6 +508,7 @@ def get_telemetry(db: Session = Depends(get_db)):
         position_summary=position_summary,
         intraday_pl=intraday_pl,
         trade_proposals=trade_proposals if trade_proposals else None,
+        accuracy_stats=get_accuracy_stats(),
     )
 
 
@@ -656,6 +676,15 @@ async def backtest_trade_history(file: UploadFile = File(...)):
         "trade_stats": trade_stats,
         "backtest": backtest_result,
         "spreads_parsed": len(spreads),
+    }
+
+
+@app.get("/api/accuracy/signals")
+def get_accuracy_signals(limit: int = 50):
+    """Returns recent accuracy tracker signals for inspection."""
+    return {
+        "signals": get_signal_log(limit=limit),
+        "stats": get_accuracy_stats(),
     }
 
 

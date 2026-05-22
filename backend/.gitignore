@@ -1,6 +1,7 @@
 # Log files
 logs/
 *.log
+accuracy_log.jsonl
 
 # Python cache
 __pycache__/

@@ -684,6 +684,47 @@ export default function App() {
               </div>
             )}
 
+            {/* --- SYSTEM ACCURACY (shown only when sufficient data) --- */}
+            {telemetry?.accuracy_stats?.data_sufficient && (
+              <div className="mb-4 bg-slate-900/80 rounded-lg p-3 border border-slate-700">
+                <div className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">System Accuracy (Live Tracking)</div>
+                <div className="grid grid-cols-2 gap-3 text-center">
+                  <div>
+                    <div className="text-[10px] text-slate-500">Exit Signal Accuracy</div>
+                    <div className={`text-lg font-bold ${
+                      telemetry.accuracy_stats.exit_accuracy_pct >= 70 ? 'text-emerald-400' :
+                      telemetry.accuracy_stats.exit_accuracy_pct >= 50 ? 'text-amber-400' : 'text-red-400'
+                    }`}>
+                      {telemetry.accuracy_stats.exit_accuracy_pct != null
+                        ? `${telemetry.accuracy_stats.exit_accuracy_pct}%`
+                        : '—'}
+                    </div>
+                    <div className="text-[10px] text-slate-500">
+                      {telemetry.accuracy_stats.exit_on_losing_trades}/{telemetry.accuracy_stats.exit_signals_total} exit calls on losing trades
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-slate-500">Hold Signal Accuracy</div>
+                    <div className={`text-lg font-bold ${
+                      telemetry.accuracy_stats.hold_accuracy_pct >= 70 ? 'text-emerald-400' :
+                      telemetry.accuracy_stats.hold_accuracy_pct >= 50 ? 'text-amber-400' : 'text-red-400'
+                    }`}>
+                      {telemetry.accuracy_stats.hold_accuracy_pct != null
+                        ? `${telemetry.accuracy_stats.hold_accuracy_pct}%`
+                        : '—'}
+                    </div>
+                    <div className="text-[10px] text-slate-500">
+                      {telemetry.accuracy_stats.hold_on_winning_trades}/{telemetry.accuracy_stats.hold_signals_total} hold calls on winning trades
+                    </div>
+                  </div>
+                </div>
+                <div className="text-[10px] text-slate-600 mt-2 text-center">
+                  Based on {telemetry.accuracy_stats.total_resolved} resolved signals
+                  {telemetry.accuracy_stats.total_unresolved > 0 && ` (${telemetry.accuracy_stats.total_unresolved} pending)`}
+                </div>
+              </div>
+            )}
+
             {/* --- POSITION SUMMARY (Iron Condor View) --- */}
             {telemetry?.position_summary && telemetry.position_summary.positions_total > 0 && (() => {
               const ps = telemetry.position_summary;
@@ -692,8 +733,8 @@ export default function App() {
                 <div className="mb-4 bg-slate-900/80 rounded-lg p-3 border border-slate-700">
                   <div className="flex justify-between items-center mb-2">
                     <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">{ps.structure.replace('_', ' ')}</span>
-                    <span className={`text-sm font-bold ${ps.total_estimated_pl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                      Est. P/L: {ps.total_estimated_pl >= 0 ? '+' : ''}${ps.total_estimated_pl.toFixed(2)}
+                    <span className={`text-sm font-bold ${ps.total_estimated_pl >= 0 ? 'text-emerald-400' : 'text-red-400'}`} title="Rough model estimate — not real options pricing">
+                      ~P/L: {ps.total_estimated_pl >= 0 ? '+' : ''}${ps.total_estimated_pl.toFixed(2)}
                     </span>
                   </div>
                   <div className="grid grid-cols-3 gap-2 text-center text-xs">
@@ -916,8 +957,8 @@ export default function App() {
                           <div className="font-bold text-slate-100">{pos.type} @ {pos.strike}</div>
                           <div className="flex items-center gap-2 text-xs text-slate-400">
                             <span>Credit: ${pos.credit}</span>
-                            <span className={`font-bold ${pos.estimated_pl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                              Est. P/L: {pos.estimated_pl >= 0 ? '+' : ''}${pos.estimated_pl?.toFixed(2)}
+                            <span className={`font-bold ${pos.estimated_pl >= 0 ? 'text-emerald-400' : 'text-red-400'}`} title="Rough model estimate — not real options pricing">
+                              ~P/L: {pos.estimated_pl >= 0 ? '+' : ''}${pos.estimated_pl?.toFixed(2)}
                             </span>
                             {pos.breakeven_event && (
                               <span className="font-bold text-yellow-400 animate-pulse">
@@ -1197,36 +1238,39 @@ export default function App() {
           {/* BACKTEST RESULTS */}
           {backtestResult?.summary && (
             <div className="bg-slate-800 border border-slate-700 rounded-lg p-6 shadow-xl">
-              <h3 className="text-lg font-bold text-slate-200 mb-2">Backtest: System vs Your Trades</h3>
-              <p className="text-xs text-slate-400 mb-4">Each trade date was replayed through the regime engine using historical SPY 5-min bars. The system verdict shows what it would have recommended for your actual strikes.</p>
+              <h3 className="text-lg font-bold text-slate-200 mb-2">Backtest: Risk Analysis</h3>
+              <p className="text-xs text-slate-400 mb-1">Each trade date was replayed through the regime engine using historical SPY 5-min bars.</p>
+              <p className="text-[10px] text-amber-500/70 mb-4">Caveat: Robinhood does not provide entry times. The full trading day is replayed from market open, so early exit signals may not reflect your actual entry conditions.</p>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
                 <div className="bg-slate-900 rounded p-3 text-center">
                   <div className="text-xs text-slate-500">Days Analyzed</div>
                   <div className="text-2xl font-bold text-slate-100">{backtestResult.summary.days_processed}</div>
                 </div>
                 <div className="bg-slate-900 rounded p-3 text-center">
-                  <div className="text-xs text-slate-500">System Exit Flags</div>
+                  <div className="text-xs text-slate-500">Total Trades</div>
+                  <div className="text-2xl font-bold text-slate-100">{backtestResult.summary.total_trades}</div>
+                </div>
+                <div className="bg-slate-900 rounded p-3 text-center">
+                  <div className="text-xs text-slate-500">Exit Flags</div>
                   <div className="text-2xl font-bold text-amber-400">{backtestResult.summary.system_exit_flags}</div>
+                  <div className="text-[10px] text-slate-500 mt-1">system flagged risk</div>
                 </div>
                 <div className="bg-slate-900 rounded p-3 text-center">
-                  <div className="text-xs text-slate-500">System Safe Flags</div>
+                  <div className="text-xs text-slate-500">Safe Flags</div>
                   <div className="text-2xl font-bold text-emerald-400">{backtestResult.summary.system_safe_flags}</div>
-                </div>
-                <div className="bg-slate-900 rounded p-3 text-center">
-                  <div className="text-xs text-slate-500">Potential Savings</div>
-                  <div className="text-2xl font-bold text-blue-400">${backtestResult.summary.potential_savings}</div>
+                  <div className="text-[10px] text-slate-500 mt-1">system held throughout</div>
                 </div>
               </div>
               {backtestResult.summary.alignment && (
                 <div className="bg-slate-900 rounded p-3 mb-4">
-                  <div className="text-xs text-slate-500 mb-2">Alignment Analysis</div>
+                  <div className="text-xs text-slate-500 mb-2">Outcome Breakdown</div>
                   <div className="flex flex-wrap gap-2">
                     {Object.entries(backtestResult.summary.alignment).map(([k, v]) => (
                       <span key={k} className={`text-xs font-bold px-2 py-1 rounded ${
                         k === 'ALIGNED_WIN' ? 'bg-emerald-900/50 text-emerald-400' :
-                        k === 'SYSTEM_CORRECT' ? 'bg-blue-900/50 text-blue-400' :
-                        k === 'LUCKY_WIN' ? 'bg-amber-900/50 text-amber-400' :
-                        k === 'BOTH_WRONG' ? 'bg-red-900/50 text-red-400' :
+                        k === 'EXIT_FLAGGED_LOST' ? 'bg-blue-900/50 text-blue-400' :
+                        k === 'EXIT_FLAGGED_WON' ? 'bg-amber-900/50 text-amber-400' :
+                        k === 'BOTH_MISSED' ? 'bg-red-900/50 text-red-400' :
                         'bg-slate-700 text-slate-300'
                       }`}>{k.replace(/_/g, ' ')}: {v}</span>
                     ))}
@@ -1245,7 +1289,7 @@ export default function App() {
                         <th className="text-right px-2">P/L</th>
                         <th className="text-right px-2">Min Moat</th>
                         <th className="text-center px-2">System</th>
-                        <th className="text-center px-2">Alignment</th>
+                        <th className="text-center px-2">Outcome</th>
                         <th className="text-left px-2">Detail</th>
                       </tr>
                     </thead>
@@ -1270,13 +1314,16 @@ export default function App() {
                             <td className="text-center px-2">
                               <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
                                 s.alignment === 'ALIGNED_WIN' ? 'bg-emerald-900/50 text-emerald-400' :
-                                s.alignment === 'SYSTEM_CORRECT' ? 'bg-blue-900/50 text-blue-400' :
-                                s.alignment === 'LUCKY_WIN' ? 'bg-amber-900/50 text-amber-400' :
-                                s.alignment === 'BOTH_WRONG' ? 'bg-red-900/50 text-red-400' :
+                                s.alignment === 'EXIT_FLAGGED_LOST' ? 'bg-blue-900/50 text-blue-400' :
+                                s.alignment === 'EXIT_FLAGGED_WON' ? 'bg-amber-900/50 text-amber-400' :
+                                s.alignment === 'BOTH_MISSED' ? 'bg-red-900/50 text-red-400' :
                                 'bg-slate-700 text-slate-300'
                               }`}>{s.alignment.replace(/_/g, ' ')}</span>
                             </td>
-                            <td className="px-2 text-xs text-slate-400 max-w-[250px] truncate">{s.system_detail}</td>
+                            <td className="px-2 text-xs text-slate-400 max-w-md whitespace-normal break-words">
+                              <div>{s.system_detail}</div>
+                              <div className="text-[10px] text-slate-500 mt-0.5 italic">{s.alignment_label}</div>
+                            </td>
                           </tr>
                         ))
                       )}
