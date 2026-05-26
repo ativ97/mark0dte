@@ -1,27 +1,35 @@
-# 0DTE Quant System - Local Installation Guide
+# 0DTE Quant Engine
 
-Follow these steps in your IDE terminal to spin up the dashboard.
+A decision-support system for selling SPX 0DTE credit spreads. Combines real-time market data (Alpaca, Yahoo Finance, ThetaData) with regime classification, smart moat calculation, and position management.
+
+**Current Version**: Phase 16 (V5.5+ with conditional expected move, reversal-aware exits, time-adjusted take profit)
 
 ## 1. Setup the Python Backend
-
-Open your terminal in the backend directory and run:
 
 ```sh
 cd backend
 
-# Create a Conda environment (Recommended)
-conda create -n 0dte_env python=3.9
-conda activate 0dte_env
+# Create a Conda environment
+conda create -n mark python=3.13
+conda activate mark
 
-# Install the required Quantitative libraries
+# Install dependencies
 pip install -r requirements.txt
+pip install pytest  # for running tests
 
 # Run the server
-python main.py
+python -m uvicorn main:app --reload
 ```
-*(Alternatively, you can run `main.py` directly using the green Play button in PyCharm, ensuring your Conda interpreter is selected).*
 
 The server is now running on http://127.0.0.1:8000.
+
+### Run Tests
+
+```sh
+cd backend
+python -m pytest test_engine.py -v --tb=short
+# Expected: 18 passed
+```
 
 ## 2. Setup the React Frontend
 

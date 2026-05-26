@@ -1,6 +1,6 @@
 # 0DTE Algorithmic Decision Support System
 
-**System Architecture & State Rules - Version 5.5**
+**System Architecture & State Rules - Version 5.6**
 
 ## 1. Core Philosophy
 
@@ -324,6 +324,14 @@ State is cleared per-position on close and globally on market close via `clear_r
 
 ## 21. System Modification Log
 
+* **[V5.6] Phase 16 — Algo Intelligence (C1-C4):**
+  - C1: Conditional expected move — `compute_expected_move()` discounts remaining σ by move already consumed from open. >0.3σ consumed triggers discount (floor 0.40×).
+  - C4: Move-consumed smart moat — 7th multiplicative factor in `compute_smart_moat()`. Scale: 0.3σ→1.0, 1.0σ→0.85, 2.0σ→0.70, floor 0.65.
+  - C2: Reversal-aware exits — `evaluate_positions()` computes reversal_score (0-100) from RSI extreme + ER weakness + GEX wall proximity + range position. Score ≥50 in WARNING zone downgrades CLOSE → HOLD_WITH_TRIGGER.
+  - C3: Time-adjusted take profit — `generate_recommendations()` threshold: >3h→90%, 2-3h→80%, 1-2h→75%, <1h→50%.
+  - #37: Momentum label fix — RANGEBOUND no longer fires when ER > 0.25 (directional signal present).
+  - Plumbing: `fetch_spx_day_range()` returns `day_open_spx`. `evaluate_positions()` accepts `rsi_14`, `er_value`. SmartMoat/ExpectedMove schemas updated.
+  - 18 unit tests (3 original + 15 new). All passing.
 * **[V5.5] Phases 11-17 — Advanced Position Intelligence:**
   - Phase 11: Realized daily move distribution from 120 days of ^GSPC closes. Cached daily. "Reality Check" display.
   - Phase 12b: Cumulative drift tracker — 90-min rolling SPX drift toward strikes. Orange badge + recommendation.

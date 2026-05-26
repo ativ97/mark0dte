@@ -8,7 +8,7 @@ from config import (
     CHOP_THRESHOLD, EFFICIENCY_RATIO_THRESHOLD,
     RSI_DEAD_ZONE_LOWER, RSI_DEAD_ZONE_UPPER,
     EMA_COMPRESSION_THRESHOLD_PCT, VWAP_ELASTICITY_THRESHOLD_PCT,
-    GAMMA_TRAP_THRESHOLD, WARNING_ZONE_THRESHOLD,
+    GAMMA_TRAP_THRESHOLD, WARNING_ZONE_THRESHOLD, SAFE_ZONE_THRESHOLD,
     MOAT_BAR_SCALE, BREACH_VERIFICATION_MINUTES,
     STATE_A_MIN_MOAT, STATE_B_MIN_MOAT, STATE_C_MIN_MOAT,
     MARKET_CLOSE_HOUR_ET, GAMMA_ACCELERATION_HOUR_ET, FINAL_HOUR_MOAT_MULTIPLIER,
@@ -661,13 +661,24 @@ def _compute_momentum_context(df: pd.DataFrame) -> dict:
     day_range = day_high - day_low
     range_position = round(((current_close - day_low) / day_range) * 100, 1) if day_range > 0 else 50.0
 
+    # ER context for momentum label (prevents false RANGEBOUND during directional markets)
+    er_current = 0.0
+    if 'ER_10' in df.columns:
+        er_current = float(df['ER_10'].iloc[-1])
+
     # Momentum label
     if change_2h_pct < -0.5:
         label = "SELLOFF RECOVERY" if change_1h_pct > 0.1 else "ACTIVE SELLOFF"
     elif change_2h_pct > 0.5:
         label = "FADING RALLY" if change_1h_pct < -0.1 else "ACTIVE RALLY"
     elif abs(change_2h_pct) < 0.15:
-        label = "RANGEBOUND"
+        # #37 Fix: RANGEBOUND should not fire when ER shows directional signal
+        # ER > 0.25 means price has clear trend despite small 2h change
+        # (can happen after a gap open where price consolidates near the open)
+        if er_current > 0.25:
+            label = "MILD DRIFT UP" if change_2h_pct >= 0 else "MILD DRIFT DOWN"
+        else:
+            label = "RANGEBOUND"
     else:
         label = "MILD DRIFT UP" if change_2h_pct > 0 else "MILD DRIFT DOWN"
 
@@ -894,7 +905,9 @@ def compute_smart_moat(regime_data: dict, spx_price: float,
                         day_high_spx: float, day_low_spx: float,
                         range_position: float,
                         vix_based_moat: float = None,
-                        gex_data: dict = None) -> dict:
+                        gex_data: dict = None,
+                        expected_move_data: dict = None,
+                        day_open_spx: float = None) -> dict:
     """
     PHASE 4: Smart Moat System.
     Adjusts the effective moat based on:
@@ -904,6 +917,7 @@ def compute_smart_moat(regime_data: dict, spx_price: float,
     4. Range exhaustion: if price tested both extremes and returned to center
     5. (Phase 7) VIX-based expected move: replaces static base moat with math-grounded value
     6. (Phase 9) GEX regime: positive GEX (mean-reverting) tightens, negative widens
+    7. (Phase 16/C4) Move consumed: if SPX already moved >0.5σ from open, reduce moat
     Returns enriched regime data with smart_moat fields.
     """
     regime_score = regime_data["regime_score"]
@@ -1000,9 +1014,28 @@ def compute_smart_moat(regime_data: dict, spx_price: float,
         else:
             gex_label = "NEUTRAL"
 
+    # ---- 7. MOVE-CONSUMED FACTOR (C4) ----
+    # If SPX has already moved significantly from the open, the remaining expected
+    # move is smaller. This makes tighter moats acceptable after big moves.
+    # Example: 1σ consumed → factor 0.85, 2σ consumed → factor 0.70
+    move_consumed_factor = 1.0
+    move_consumed_pct = 0.0
+    if expected_move_data and expected_move_data.get("move_consumed_pct", 0) > 0.3:
+        move_consumed_pct = expected_move_data["move_consumed_pct"]
+        # Scale: 0.3σ → no effect, 1.0σ → 0.85, 2.0σ → 0.70
+        # Capped at 0.65 floor so we never go too aggressive
+        move_consumed_factor = max(0.65, 1.0 - (move_consumed_pct - 0.3) * 0.20)
+    elif day_open_spx and day_open_spx > 0 and expected_move_data:
+        # Fallback: compute from day_open if expected_move_data didn't include it
+        full_day_1sigma = expected_move_data.get("full_day_1sigma", 0)
+        if full_day_1sigma > 0:
+            move_consumed_pct = abs(spx_price - day_open_spx) / full_day_1sigma
+            if move_consumed_pct > 0.3:
+                move_consumed_factor = max(0.65, 1.0 - (move_consumed_pct - 0.3) * 0.20)
+
     # ---- COMBINE FACTORS ----
     # Apply all factors to the base moat, with a floor
-    combined_factor = range_moat_factor * signal_moat_factor * time_moat_factor * exhaustion_factor * event_factor * gex_factor
+    combined_factor = range_moat_factor * signal_moat_factor * time_moat_factor * exhaustion_factor * event_factor * gex_factor * move_consumed_factor
     smart_moat = max(WARNING_ZONE_THRESHOLD + 5, round(base_moat * combined_factor))
 
     # Build explanation for the UI
@@ -1022,6 +1055,8 @@ def compute_smart_moat(regime_data: dict, spx_price: float,
     if gex_factor != 1.0:
         direction = "tightened" if gex_factor < 1 else "widened"
         adjustments.append(f"GEX {gex_label}")
+    if move_consumed_factor != 1.0:
+        adjustments.append(f"Move consumed {move_consumed_pct:.1f}σ (×{move_consumed_factor:.2f})")
 
     vix_note = f" (VIX-based)" if vix_based_moat is not None else f" (regime)"
     moat_explanation = (
@@ -1039,6 +1074,8 @@ def compute_smart_moat(regime_data: dict, spx_price: float,
         "combined_factor": round(combined_factor, 3),
         "gex_factor": gex_factor,
         "gex_label": gex_label,
+        "move_consumed_factor": round(move_consumed_factor, 3),
+        "move_consumed_pct": round(move_consumed_pct, 2),
     }
 
 
@@ -1050,7 +1087,9 @@ def evaluate_positions(db_positions, spx_price: float, db_session,
                        hours_remaining: float = 6.5,
                        momentum_label: str = "",
                        vwap_dev: float = 0.0,
-                       gex_data: dict = None):
+                       gex_data: dict = None,
+                       rsi_14: float = 50.0,
+                       er_value: float = 0.5):
     """
     PHASE 3.2: Enhanced Position Intelligence.
     - Calculates live moats and handles Time-Delayed Verification stops.
@@ -1059,6 +1098,7 @@ def evaluate_positions(db_positions, spx_price: float, db_session,
     - Directional risk flags (bearish bias → puts at higher risk).
     - Range proximity: price near day high/low amplifies risk for the exposed side.
     - IV proxy: inflates premium estimates during strong moves, high VWAP dev, range extremes.
+    - (C2) Reversal-aware exit: computes reversal probability to suppress false EJECT signals.
     """
     evaluated = []
 
@@ -1071,6 +1111,58 @@ def evaluate_positions(db_positions, spx_price: float, db_session,
     # Range proximity flags (where is SPX in today's high-low range?)
     near_day_low = range_position < 20.0   # bottom 20% of day's range
     near_day_high = range_position > 80.0  # top 20% of day's range
+
+    # ---- C2: REVERSAL SCORE (market-wide) ----
+    # Estimates probability that the current directional move is exhausted and will reverse.
+    # Used to suppress premature CRITICAL_EJECT signals during temporary spikes.
+    # Score 0-100: higher = more likely to reverse.
+    reversal_score = 0
+    reversal_reasons = []
+
+    # RSI extreme (>60 = overbought rally likely to fade, <40 = oversold selloff likely to bounce)
+    if rsi_14 > 65:
+        reversal_score += 25
+        reversal_reasons.append(f"RSI {rsi_14:.0f} overbought")
+    elif rsi_14 > 60:
+        reversal_score += 15
+        reversal_reasons.append(f"RSI {rsi_14:.0f} elevated")
+    elif rsi_14 < 35:
+        reversal_score += 25
+        reversal_reasons.append(f"RSI {rsi_14:.0f} oversold")
+    elif rsi_14 < 40:
+        reversal_score += 15
+        reversal_reasons.append(f"RSI {rsi_14:.0f} depressed")
+
+    # ER falling = trend losing steam
+    if er_value < 0.10:
+        reversal_score += 20
+        reversal_reasons.append(f"ER {er_value:.2f} dead signal")
+    elif er_value < 0.20:
+        reversal_score += 10
+        reversal_reasons.append(f"ER {er_value:.2f} weakening")
+
+    # GEX wall proximity to current price (positive GEX + near wall = strong mean-reversion)
+    if gex_data and gex_data.get("gex_regime") == "POSITIVE":
+        gamma_wall = gex_data.get("gamma_wall_spx", 0)
+        if gamma_wall > 0 and abs(spx_price - gamma_wall) < 10:
+            reversal_score += 25
+            reversal_reasons.append(f"Gamma wall {gamma_wall} within {abs(spx_price - gamma_wall):.0f} pts")
+        elif gamma_wall > 0 and abs(spx_price - gamma_wall) < 20:
+            reversal_score += 15
+            reversal_reasons.append(f"Gamma wall {gamma_wall} nearby")
+        else:
+            reversal_score += 5
+            reversal_reasons.append("GEX positive (mean-reverting)")
+
+    # Range position extreme (near day high/low = likely to revert to mean)
+    if range_position > 90 or range_position < 10:
+        reversal_score += 15
+        reversal_reasons.append(f"Range {range_position:.0f}% extreme")
+    elif range_position > 80 or range_position < 20:
+        reversal_score += 8
+        reversal_reasons.append(f"Range {range_position:.0f}% extended")
+
+    reversal_score = min(100, reversal_score)
 
     for pos in db_positions:
         # --- MARKET CLOSED: Show expired state ---
@@ -1512,6 +1604,25 @@ def evaluate_positions(db_positions, spx_price: float, db_session,
         if "escalation_level" not in exit_strategy:
             exit_strategy["escalation_level"] = esc_level
 
+        # ---- C2: REVERSAL-AWARE EXIT DOWNGRADE ----
+        # If the reversal score is high and the position is in the WARNING zone
+        # (not gamma trap or strike-breached), the adverse move is likely exhausted.
+        # Downgrade aggressive CLOSE signals to HOLD_WITH_TRIGGER.
+        if (reversal_score >= 50
+                and moat > GAMMA_TRAP_THRESHOLD
+                and exit_strategy["action"] in ("CLOSE_SOON", "CLOSE_NOW")
+                and moat <= WARNING_ZONE_THRESHOLD):
+            original_action = exit_strategy["action"]
+            exit_strategy["action"] = "HOLD_WITH_TRIGGER"
+            reversal_note = ", ".join(reversal_reasons[:3])
+            exit_strategy["instruction"] = (
+                f"[REVERSAL LIKELY ({reversal_score}/100): {reversal_note}] "
+                f"Adverse move likely exhausted. Hold unless SPX breaks through "
+                f"{exit_strategy.get('trigger_spx', 'trigger'):.0f}. "
+                f"Original signal: {original_action}."
+            )
+            exit_strategy["reversal_downgrade"] = True
+
         # ---- RECOMMENDATION PERSISTENCE ----
         # Apply cooldown + hysteresis to prevent flip-flopping
         rec_state = _update_rec_state(pos.id, exit_strategy["action"], moat)
@@ -1545,6 +1656,8 @@ def evaluate_positions(db_positions, spx_price: float, db_session,
             "breakeven_event": breakeven_event,
             "drift_alert": drift_alert,
             "premium_trend": premium_trend,
+            "reversal_score": reversal_score,
+            "reversal_reasons": reversal_reasons,
         })
 
     return evaluated
@@ -1762,7 +1875,23 @@ def generate_recommendations(evaluated_positions: list, spx_price: float,
 
         profit_pct = (credit - est_buyback) / credit * 100
 
-        if profit_pct >= 80 and moat > WARNING_ZONE_THRESHOLD:
+        # C3: Time-adjusted take profit thresholds
+        # Early in the day, let theta work — only take profit at very high %
+        # Later in the day, lower the bar since gamma risk rises
+        if hours >= 3.0:
+            tp_threshold = 90   # >3h: only close at 90%+ (theta is your friend)
+            tp_note = "With >3h left, letting theta work"
+        elif hours >= 2.0:
+            tp_threshold = 80   # 2-3h: standard 80%
+            tp_note = "Standard take-profit window"
+        elif hours >= 1.0:
+            tp_threshold = 75   # 1-2h: lower bar, gamma starting
+            tp_note = f"{hours:.1f}h left — gamma rising, lock gains"
+        else:
+            tp_threshold = 50   # <1h: take anything profitable
+            tp_note = "Final hour — lock any profit"
+
+        if profit_pct >= tp_threshold and moat > WARNING_ZONE_THRESHOLD:
             recs.append({
                 "priority": "MEDIUM",
                 "category": "CLOSE",
@@ -1770,7 +1899,8 @@ def generate_recommendations(evaluated_positions: list, spx_price: float,
                 "message": (
                     f"TAKE PROFIT: {pos['type']} {pos['strike']} at ~{profit_pct:.0f}% of max gain. "
                     f"Est. buyback ~${est_buyback:.2f} (credit ${credit:.2f}). "
-                    f"Close to lock ${credit - est_buyback:.2f}/contract profit."
+                    f"Close to lock ${credit - est_buyback:.2f}/contract profit. "
+                    f"({tp_note})"
                 ),
             })
         elif profit_pct >= 50 and moat >= effective_moat_min and hours < 2.0:
@@ -2498,3 +2628,350 @@ def auto_propose_positions(
     # Sort by score descending, return top 4
     proposals.sort(key=lambda x: x["score"], reverse=True)
     return proposals[:4]
+
+
+# ============================================================
+# PHASE 2: MARKET INSIGHTS — Plain-English Synthesis
+# ============================================================
+
+def generate_market_insights(
+    regime_data: dict,
+    evaluated_positions: list,
+    smart_moat_data: dict,
+    expected_move_data: dict = None,
+    gex_data: dict = None,
+    spx_price: float = 0.0,
+    day_high_spx: float = 0.0,
+    day_low_spx: float = 0.0,
+    recommendations: list = None,
+) -> dict:
+    """
+    Generates a plain-English market synthesis for the Insights tab.
+    Returns: market_light, market_story, position_cards, key_levels, action_items.
+    """
+    hours = regime_data["time_pressure"]["hours_remaining"]
+    er = regime_data["er_value"]
+    regime_state = regime_data["regime_state"]
+    bias = regime_data["directional_bias"]
+    momentum = regime_data.get("momentum", {})
+    momentum_label = momentum.get("momentum_label", "")
+    rsi = regime_data.get("rsi_14", 50.0)
+
+    # ---- OVERALL MARKET TRAFFIC LIGHT ----
+    market_light = "GREEN"
+    market_headline = ""
+
+    if regime_data["regime_score"] >= 3:
+        # State C — choppy / whipsaw
+        if er < 0.10:
+            market_light = "GREEN"
+            market_headline = "Market is quiet and directionless"
+        else:
+            market_light = "YELLOW"
+            market_headline = "Market is choppy — moves are unreliable"
+    elif regime_data["regime_score"] >= 2:
+        # State B — moderate
+        market_light = "YELLOW"
+        market_headline = "Market is moderately active"
+    else:
+        # State A — trending
+        if "BULLISH" in bias:
+            market_light = "YELLOW"
+            market_headline = "Market is trending up"
+        elif "BEARISH" in bias:
+            market_light = "YELLOW"
+            market_headline = "Market is trending down"
+        else:
+            market_light = "GREEN"
+            market_headline = "Market has a clean trend"
+
+    # Override to RED if time pressure is extreme
+    if hours < 0.5:
+        market_light = "RED" if any(p.get("moat", 999) < SAFE_ZONE_THRESHOLD for p in evaluated_positions) else market_light
+        market_headline += " — final 30 minutes, gamma risk is high"
+
+    # ---- MARKET STORY (2-3 sentences) ----
+    story_parts = []
+
+    # Sentence 1: What's happening right now
+    if er < 0.10:
+        story_parts.append("The market has no directional trend right now — price is drifting with no conviction.")
+    elif er < 0.20:
+        story_parts.append("The market has weak momentum — no strong trend but some movement.")
+    elif "RALLY" in momentum_label:
+        story_parts.append(f"The market is rallying — buying pressure is pushing SPX higher.")
+    elif "SELLOFF" in momentum_label:
+        story_parts.append(f"The market is selling off — SPX is dropping with conviction.")
+    elif "FADING" in momentum_label:
+        story_parts.append(f"The earlier move is fading — momentum is slowing down.")
+    elif "RECOVERY" in momentum_label:
+        story_parts.append(f"The market is recovering from an earlier selloff.")
+    else:
+        story_parts.append(f"The market is drifting {'slightly higher' if bias == 'BULLISH' else 'slightly lower' if bias == 'BEARISH' else 'sideways'}.")
+
+    # Sentence 2: What this means for positions
+    if not evaluated_positions:
+        story_parts.append("No open positions. Look for entry opportunities if conditions align.")
+    else:
+        safe_count = sum(1 for p in evaluated_positions if p.get("moat", 0) > SAFE_ZONE_THRESHOLD)
+        warning_count = sum(1 for p in evaluated_positions
+                          if GAMMA_TRAP_THRESHOLD < p.get("moat", 0) <= WARNING_ZONE_THRESHOLD)
+        danger_count = sum(1 for p in evaluated_positions if p.get("moat", 0) <= GAMMA_TRAP_THRESHOLD)
+
+        if danger_count > 0:
+            story_parts.append(f"{danger_count} position{'s' if danger_count > 1 else ''} in danger zone — close attention needed.")
+        elif warning_count > 0:
+            story_parts.append(f"{warning_count} position{'s' if warning_count > 1 else ''} in warning zone — monitor closely.")
+        elif safe_count == len(evaluated_positions):
+            story_parts.append("All positions are safe. Let theta do the work.")
+
+    # Sentence 3: Key context (GEX, time, RSI)
+    context_parts = []
+    if gex_data and gex_data.get("gex_regime") == "POSITIVE":
+        context_parts.append("dealers are stabilizing the market (positive GEX)")
+    if rsi > 65:
+        context_parts.append(f"buying is overextended (RSI {rsi:.0f}) — a pullback is likely")
+    elif rsi < 35:
+        context_parts.append(f"selling is overextended (RSI {rsi:.0f}) — a bounce is likely")
+    if hours < 1.5:
+        context_parts.append(f"only {hours:.1f}h left — theta is accelerating in your favor")
+    elif hours > 4:
+        context_parts.append(f"{hours:.1f}h remaining — plenty of time for theta decay")
+
+    if expected_move_data and expected_move_data.get("move_consumed_pct", 0) > 0.5:
+        pct = expected_move_data["move_consumed_pct"]
+        context_parts.append(f"SPX has already used {pct:.1f}x of today's expected move — further extension unlikely")
+
+    if context_parts:
+        story_parts.append("Key factors: " + ", ".join(context_parts) + ".")
+
+    market_story = " ".join(story_parts)
+
+    # ---- PER-POSITION TRAFFIC LIGHTS ----
+    position_cards = []
+    for pos in evaluated_positions:
+        moat = pos.get("moat", 0)
+        moat_pct = pos.get("moat_pct", 0)
+        credit = pos.get("credit", 0)
+        est_buyback = pos.get("estimated_buyback", credit)
+        profit_pct = ((credit - est_buyback) / credit * 100) if credit > 0 else 0
+        exit_action = pos.get("exit_strategy", {}).get("action", "HOLD")
+        reversal = pos.get("reversal_score", 0)
+
+        # Determine traffic light
+        if moat <= GAMMA_TRAP_THRESHOLD:
+            light = "RED"
+            verdict = "Danger — strike is very close"
+        elif moat <= WARNING_ZONE_THRESHOLD:
+            if reversal >= 50:
+                light = "YELLOW"
+                verdict = f"Under pressure but reversal likely ({reversal}/100)"
+            else:
+                light = "RED"
+                verdict = "Warning zone — monitor closely"
+        elif moat < pos.get("exit_strategy", {}).get("trigger_spx", moat + 999) and exit_action in ("CLOSE_SOON", "CLOSE_NOW"):
+            light = "RED"
+            verdict = f"System recommends closing"
+        elif profit_pct >= 80:
+            light = "GREEN"
+            verdict = f"~{profit_pct:.0f}% profit — consider taking gains"
+        elif moat > SAFE_ZONE_THRESHOLD:
+            light = "GREEN"
+            verdict = "Safe — theta is working"
+        else:
+            light = "YELLOW"
+            verdict = "Caution — moat is thin"
+
+        # One-line summary
+        direction_word = "below" if pos["type"] == "Put Spread" else "above"
+        summary = f"{pos['type']} {pos['strike']}: {moat:.0f} pts {direction_word} strike"
+        if profit_pct > 0:
+            summary += f", ~{profit_pct:.0f}% profit"
+
+        # Action
+        action = "Hold"
+        if exit_action == "LET_EXPIRE":
+            action = "Let expire"
+        elif exit_action == "CLOSE_NOW":
+            action = "Close now"
+        elif exit_action == "CLOSE_SOON":
+            action = "Close soon"
+        elif exit_action == "HOLD_WITH_TRIGGER":
+            trigger = pos.get("exit_strategy", {}).get("trigger_spx", 0)
+            action = f"Hold — watch SPX {trigger:.0f}" if trigger else "Hold with caution"
+        elif profit_pct >= 80 and hours < 2:
+            action = f"Take profit at ~${est_buyback:.2f}"
+
+        # Context: what needs to happen for danger
+        day_range = round(day_high_spx - day_low_spx, 0) if day_high_spx and day_low_spx else 0
+        direction = "rise" if pos["type"] == "Call Spread" else "drop"
+        context = f"SPX needs to {direction} {moat:.0f} pts to reach your strike."
+        if day_range > 0:
+            if moat > day_range:
+                context += f" Today's entire range is only {day_range:.0f} pts — very unlikely."
+            elif moat > day_range * 0.5:
+                context += f" That's {moat/day_range*100:.0f}% of today's {day_range:.0f}-pt range."
+            else:
+                context += f" That's within today's {day_range:.0f}-pt range — stay alert."
+
+        position_cards.append({
+            "id": pos["id"],
+            "light": light,
+            "type": pos["type"],
+            "strike": pos["strike"],
+            "summary": summary,
+            "verdict": verdict,
+            "action": action,
+            "moat": round(moat, 1),
+            "profit_pct": round(profit_pct, 0),
+            "reversal_score": reversal,
+            "heat_score": _compute_heat_score(pos, regime_data, gex_data),
+            "context": context,
+        })
+
+    # ---- KEY LEVELS ----
+    key_levels = []
+    if day_high_spx and day_low_spx:
+        key_levels.append({
+            "level": round(day_high_spx, 1),
+            "label": "Day High",
+            "meaning": "Resistance — price struggled to go above this today",
+        })
+        key_levels.append({
+            "level": round(day_low_spx, 1),
+            "label": "Day Low",
+            "meaning": "Support — price bounced off this level today",
+        })
+
+    if gex_data:
+        gw = gex_data.get("gamma_wall_spx", 0)
+        pw = gex_data.get("put_wall_spx", 0)
+        cw = gex_data.get("call_wall_spx", 0)
+        net_gex = gex_data.get("net_gex", 0)
+        net_gex_str = f"{abs(net_gex)/1e6:.0f}M" if abs(net_gex) >= 1e6 else f"{abs(net_gex)/1e3:.0f}K"
+
+        # Look up per-strike GEX from top_levels
+        top_levels = gex_data.get("top_levels", [])
+        def _strike_gex_str(spx_level):
+            for tl in top_levels:
+                if abs(tl.get("strike_spx", 0) - spx_level) < 2:
+                    g = tl.get("gex", 0)
+                    return f" (~{abs(g)/1e6:.1f}M gamma)" if abs(g) >= 1e6 else f" (~{abs(g)/1e3:.0f}K gamma)"
+            return ""
+
+        if gw and gw > 0:
+            dist = round(abs(spx_price - gw), 0)
+            strength = _strike_gex_str(gw)
+            key_levels.append({
+                "level": round(gw, 1),
+                "label": "Gamma Wall",
+                "meaning": f"Strongest dealer magnet{strength} — {dist:.0f} pts away. Price gravitates here.",
+            })
+        if pw and pw > 0:
+            strength = _strike_gex_str(pw)
+            key_levels.append({
+                "level": round(pw, 1),
+                "label": "Put Wall (Support)",
+                "meaning": f"Dealers buy here to hedge{strength} — acts as a floor for price",
+            })
+        if cw and cw > 0:
+            strength = _strike_gex_str(cw)
+            key_levels.append({
+                "level": round(cw, 1),
+                "label": "Call Wall (Resistance)",
+                "meaning": f"Dealers sell here to hedge{strength} — acts as a ceiling for price",
+            })
+
+    # Add position strikes as levels
+    for pos in evaluated_positions:
+        key_levels.append({
+            "level": pos["strike"],
+            "label": f"Your {pos['type']} Strike",
+            "meaning": f"{'Danger' if pos.get('moat', 0) < WARNING_ZONE_THRESHOLD else 'Safe'} — {pos.get('moat', 0):.0f} pts away",
+        })
+
+    # Sort levels by price
+    key_levels.sort(key=lambda x: x["level"])
+
+    # ---- ACTION ITEMS (top 3 most important) ----
+    action_items = []
+    if recommendations:
+        for rec in recommendations[:3]:
+            action_items.append({
+                "priority": rec.get("priority", "MEDIUM"),
+                "message": rec.get("message", ""),
+            })
+
+    return {
+        "market_light": market_light,
+        "market_headline": market_headline,
+        "market_story": market_story,
+        "position_cards": position_cards,
+        "key_levels": key_levels,
+        "action_items": action_items,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _compute_heat_score(pos: dict, regime_data: dict, gex_data: dict = None) -> int:
+    """
+    Phase 2 (#30): Computes a 0-100 heat score for a position.
+    Higher = more danger. 0 = perfectly safe.
+    Factors: moat proximity, bias alignment, GEX proximity, ER direction, range position, time.
+    """
+    score = 0
+    moat = pos.get("moat", 100)
+    moat_pct = pos.get("moat_pct", 100)
+
+    # 1. Moat proximity (0-35 pts) — biggest factor
+    if moat <= GAMMA_TRAP_THRESHOLD:
+        score += 35
+    elif moat <= WARNING_ZONE_THRESHOLD:
+        score += 25
+    elif moat <= SAFE_ZONE_THRESHOLD:
+        score += 15
+    else:
+        # Scale 0-10 based on how far above safe
+        score += max(0, 10 - int(moat_pct / 10))
+
+    # 2. Bias alignment (0-20 pts)
+    bias = regime_data.get("directional_bias", "NEUTRAL")
+    pos_type = pos.get("type", "")
+    if ("BULLISH" in bias and "Call" in pos_type) or ("BEARISH" in bias and "Put" in pos_type):
+        score += 20  # trend toward your strike
+    elif "NEUTRAL" in bias:
+        score += 5
+    # else trend away = 0 pts (good)
+
+    # 3. GEX protection (0-15 pts)
+    if gex_data:
+        gex_regime = gex_data.get("gex_regime", "NEUTRAL")
+        if gex_regime == "NEGATIVE":
+            score += 15  # no dealer stabilization
+        elif gex_regime == "NEUTRAL":
+            score += 8
+        # POSITIVE = 0 (protected)
+
+    # 4. ER / momentum direction (0-15 pts)
+    er = regime_data.get("er_value", 0)
+    if er > 0.40:
+        # Strong trend — dangerous if toward strike
+        if ("BULLISH" in bias and "Call" in pos_type) or ("BEARISH" in bias and "Put" in pos_type):
+            score += 15
+        else:
+            score += 0  # trend away = safe
+    elif er > 0.20:
+        score += 5
+    # Dead ER = 0 pts (no threat)
+
+    # 5. Time remaining (0-15 pts) — gamma risk
+    hours = regime_data["time_pressure"]["hours_remaining"]
+    if hours < 0.5:
+        score += 15
+    elif hours < 1.0:
+        score += 10
+    elif hours < 2.0:
+        score += 5
+    # Plenty of time = 0
+
+    return min(100, score)

@@ -5,6 +5,9 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [activeTab, setActiveTab] = useState('dashboard');
+  const [showStory, setShowStory] = useState(true);
+  const [showEvidence, setShowEvidence] = useState(true);
+  const [showRaw, setShowRaw] = useState(false);
 
   const [newPosition, setNewPosition] = useState({ type: 'Put Spread', strike: '', credit: '' });
   const [tradeAnalysis, setTradeAnalysis] = useState(null);
@@ -196,10 +199,381 @@ export default function App() {
 
       {error && <div className="bg-red-900/50 border border-red-500 text-red-200 p-4 rounded mb-6">{error}</div>}
 
+      {/* === STICKY CONTEXT BAR === */}
+      {activeTab === 'dashboard' && telemetry && (
+        <div className="sticky top-0 z-30 bg-slate-950/95 backdrop-blur border-b border-slate-700/50 -mx-6 px-6 py-2 mb-4">
+          <div className="flex items-center gap-4 text-xs flex-wrap">
+            <span className="font-mono font-bold text-emerald-400 text-sm" title="Current SPX price">SPX {telemetry.spx_price?.toFixed(0)}</span>
+            <span className={`font-bold px-1.5 py-0.5 rounded ${
+              telemetry.regime_state?.includes('TRENDING') ? 'bg-blue-900/50 text-blue-400' :
+              telemetry.regime_state?.includes('WHIPSAW') || telemetry.regime_state?.includes('ENTROPY') ? 'bg-red-900/50 text-red-400' :
+              'bg-slate-700 text-slate-300'
+            }`} title={`Regime: ${telemetry.regime_state}. Score ${telemetry.regime_score}/4`}>{telemetry.regime_state?.replace('STATE ', '').split(' ')[0]} {telemetry.regime_score}/4</span>
+            <span className={`font-bold ${
+              telemetry.directional_bias?.includes('BEAR') ? 'text-red-400' :
+              telemetry.directional_bias?.includes('BULL') ? 'text-emerald-400' :
+              'text-slate-400'
+            }`} title="Directional bias from EMA crossover + RSI + momentum">{telemetry.directional_bias}</span>
+            <span className="text-slate-400" title={`Smart Moat: minimum safe distance between SPX and your closest strike. Computed from 7 factors.`}>Moat <span className="text-slate-200 font-bold">{telemetry.effective_moat_min}</span>pts</span>
+            {telemetry.gex_data?.gex_regime !== 'UNAVAILABLE' && (
+              <span className={`font-mono px-1.5 py-0.5 rounded ${telemetry.gex_data?.gex_regime === 'POSITIVE' ? 'bg-emerald-900/40 text-emerald-400' : telemetry.gex_data?.gex_regime === 'NEGATIVE' ? 'bg-red-900/40 text-red-400' : 'bg-slate-700 text-slate-400'}`} title="Gamma Exposure regime. POSITIVE=mean-reverting (safe), NEGATIVE=trending (danger)">
+                GEX {telemetry.gex_data?.net_gex ? `${(telemetry.gex_data.net_gex/1e6).toFixed(0)}M` : ''}
+              </span>
+            )}
+            {telemetry.time_pressure?.hours_remaining != null && (
+              <span className={`${telemetry.time_pressure.hours_remaining < 1 ? 'text-red-400 font-bold' : telemetry.time_pressure.hours_remaining < 2 ? 'text-amber-400' : 'text-slate-400'}`} title="Hours remaining until market close">
+                {telemetry.time_pressure.hours_remaining.toFixed(1)}h left
+              </span>
+            )}
+            <span className="text-slate-600 ml-auto">{new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Chicago' })} CT</span>
+          </div>
+        </div>
+      )}
+
       {activeTab === 'dashboard' && (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="space-y-6">
+
+          {/* ===== LAYER 1: MARKET NARRATIVE (collapsible, open by default) ===== */}
+          <button
+            onClick={() => setShowStory(prev => !prev)}
+            className="w-full flex items-center justify-between bg-slate-800/70 hover:bg-slate-800 border border-slate-700 rounded-lg px-5 py-3 transition-colors group"
+          >
+            <div className="flex items-center gap-3">
+              {telemetry?.market_insights && (() => {
+                const lc = { GREEN: 'bg-emerald-500', YELLOW: 'bg-amber-500', RED: 'bg-red-500' };
+                return <div className={`w-3.5 h-3.5 rounded-full ${lc[telemetry.market_insights.market_light] || 'bg-slate-500'}`}></div>;
+              })()}
+              <span className="text-sm font-semibold text-slate-400 uppercase tracking-wider group-hover:text-slate-200">Market Narrative &amp; Analysis</span>
+            </div>
+            <span className="text-slate-500 text-lg">{showStory ? '\u2212' : '+'}</span>
+          </button>
+          {showStory && telemetry?.market_insights && (() => {
+            const insights = telemetry.market_insights;
+            const lightColors = { GREEN: 'bg-emerald-500', YELLOW: 'bg-amber-500', RED: 'bg-red-500' };
+            const lightGlow = { GREEN: 'shadow-emerald-500/40', YELLOW: 'shadow-amber-500/40', RED: 'shadow-red-500/40' };
+            const lightTextColors = { GREEN: 'text-emerald-400', YELLOW: 'text-amber-400', RED: 'text-red-400' };
+            const lightTooltip = { GREEN: 'Green = safe conditions, theta is working for you', YELLOW: 'Yellow = caution, something needs attention', RED: 'Red = danger, immediate action may be needed' };
+            const heatColor = (score) => {
+              if (score >= 70) return 'text-red-400 border-red-500 bg-red-500/10';
+              if (score >= 40) return 'text-amber-400 border-amber-500 bg-amber-500/10';
+              return 'text-emerald-400 border-emerald-500 bg-emerald-500/10';
+            };
+            const heatTooltip = (score) => {
+              if (score >= 70) return `Heat ${score}/100: HIGH DANGER \u2014 multiple risk factors converging. Consider closing.`;
+              if (score >= 40) return `Heat ${score}/100: ELEVATED \u2014 some risk factors present. Watch closely.`;
+              return `Heat ${score}/100: LOW \u2014 position is well-protected. Theta is working.`;
+            };
+            const gexRegime = telemetry.gex_data?.gex_regime;
+            const gexTooltip = gexRegime === 'POSITIVE'
+              ? 'POSITIVE GEX: Dealers are long gamma. They buy dips and sell rips, creating mean-reversion. Good for credit spreads.'
+              : gexRegime === 'NEGATIVE'
+              ? 'NEGATIVE GEX: Dealers are short gamma. They sell dips and buy rips, amplifying moves. Dangerous for credit spreads.'
+              : 'NEUTRAL GEX: Balanced dealer positioning. No strong directional bias from options market makers.';
+            const netGex = telemetry.gex_data?.net_gex;
+            const netGexStr = netGex ? (Math.abs(netGex) >= 1e6 ? `${(netGex/1e6).toFixed(0)}M` : `${(netGex/1e3).toFixed(0)}K`) : 'N/A';
+            return (
+              <div className="space-y-4">
+                {/* Market Overview — Narrative + GEX + Action Items */}
+                <div className="bg-slate-800 border border-slate-700 rounded-lg p-5 shadow-xl">
+                  <div className="flex items-center gap-4 mb-3">
+                    <div className={`w-5 h-5 rounded-full ${lightColors[insights.market_light] || 'bg-slate-500'} shadow-lg ${lightGlow[insights.market_light] || ''}`} title={lightTooltip[insights.market_light] || ''}></div>
+                    <h2 className={`text-xl font-bold ${lightTextColors[insights.market_light] || 'text-slate-300'}`}>{insights.market_headline}</h2>
+                    <div className="ml-auto flex items-center gap-3">
+                      <span className="text-sm text-slate-500" title="S&P 500 index price \u2014 all strikes and moats are measured against this">SPX <span className="text-emerald-400 font-bold">{telemetry.spx_price?.toFixed(2)}</span></span>
+                      {gexRegime && gexRegime !== 'UNAVAILABLE' && (
+                        <span className={`text-xs font-mono px-1.5 py-0.5 rounded ${gexRegime === 'POSITIVE' ? 'bg-emerald-900/40 text-emerald-400' : gexRegime === 'NEGATIVE' ? 'bg-red-900/40 text-red-400' : 'bg-slate-700 text-slate-400'}`} title={gexTooltip}>
+                          GEX {netGexStr}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <p className="text-slate-300 leading-relaxed text-[15px]">{insights.market_story}</p>
+                  {insights.action_items?.length > 0 && (
+                    <div className="mt-3 pt-3 border-t border-slate-700">
+                      <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5" title="Top 3 most urgent recommendations from the algo">Action Items</div>
+                      {insights.action_items.map((item, i) => (
+                        <div key={i} className={`text-sm py-1.5 px-3 rounded mb-1.5 ${item.priority === 'CRITICAL' ? 'bg-red-900/40 text-red-300 border-l-2 border-red-500' : item.priority === 'HIGH' ? 'bg-amber-900/30 text-amber-300 border-l-2 border-amber-500' : 'bg-slate-700/50 text-slate-300 border-l-2 border-slate-600'}`} title={item.priority === 'CRITICAL' ? 'CRITICAL: Act immediately' : item.priority === 'HIGH' ? 'HIGH: Act soon, this is important' : 'MEDIUM: Worth monitoring but not urgent'}>
+                          {item.message}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Position Cards */}
+                {insights.position_cards?.length > 0 && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {insights.position_cards.map((card) => (
+                      <div key={card.id} className="bg-slate-800 border border-slate-700 rounded-lg p-4 shadow-lg">
+                        <div className="flex items-center gap-2 mb-1.5">
+                          <div className={`w-3.5 h-3.5 rounded-full flex-shrink-0 ${lightColors[card.light] || 'bg-slate-500'} shadow-md ${lightGlow[card.light] || ''}`} title={lightTooltip[card.light] || ''}></div>
+                          <span className="font-semibold text-slate-200 text-sm" title={`Your ${card.type} at strike ${card.strike}. SPX is currently ${card.moat?.toFixed(0)} points away.`}>{card.type} {card.strike}</span>
+                          <span className={`ml-auto text-xs font-mono px-1.5 py-0.5 rounded border cursor-help ${card.heat_score >= 70 ? 'text-red-400 border-red-500 bg-red-500/10' : card.heat_score >= 40 ? 'text-amber-400 border-amber-500 bg-amber-500/10' : 'text-emerald-400 border-emerald-500 bg-emerald-500/10'}`} title={heatTooltip(card.heat_score)}>
+                            {card.heat_score}
+                          </span>
+                        </div>
+                        <div className={`text-sm font-medium mb-0.5 ${lightTextColors[card.light] || 'text-slate-400'}`}>{card.verdict}</div>
+                        {card.context && <div className="text-[11px] text-slate-500 mb-1">{card.context}</div>}
+                        <div className="flex items-center justify-between">
+                          <span className="text-sm text-cyan-400 font-medium">{card.action}</span>
+                          <div className="flex items-center gap-2">
+                            {card.profit_pct > 0 && <span className="text-xs text-emerald-400 cursor-help" title={`Estimated ${card.profit_pct}% of max profit captured. Based on premium decay model (approximate).`}>~{card.profit_pct}%</span>}
+                            {card.reversal_score > 0 && <span className="text-xs text-purple-400 cursor-help" title={`Reversal Score ${card.reversal_score}/100: Probability that price will reverse away from your strike. Based on RSI extremes, ER weakness, GEX walls, and range position. Above 50 = algo may hold instead of exit.`}>Rev: {card.reversal_score}</span>}
+                            <button onClick={() => closePosition(card.id)} title="Close position (archive with P/L)" className="text-emerald-500 hover:text-emerald-400 font-bold px-1 py-0.5 text-xs rounded hover:bg-emerald-900/30 leading-none">Close</button>
+                            <button onClick={() => deletePosition(card.id)} title="Delete (mistake)" className="text-red-500/60 hover:text-red-400 px-1 py-0.5 text-xs rounded hover:bg-red-900/30 leading-none">Del</button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Quick Add Position — link to raw dashboard form */}
+                <button
+                  onClick={() => setShowRaw(true)}
+                  className="w-full text-left px-4 py-2.5 rounded border border-dashed border-slate-600 hover:border-emerald-500/50 hover:bg-emerald-900/10 text-slate-500 hover:text-emerald-400 text-sm transition-colors"
+                >
+                  + Add Position / Analyze Trade <span className="text-slate-600 text-xs">(opens Raw Dashboard)</span>
+                </button>
+
+                {/* Key Levels — vertical price ladder, high to low */}
+                {insights.key_levels?.length > 0 && (() => {
+                  const spx = telemetry.spx_price || 0;
+                  const deduped = [];
+                  const seen = {};
+                  insights.key_levels.forEach(lvl => {
+                    const key = lvl.level.toFixed(0);
+                    if (seen[key]) {
+                      seen[key].label += ' / ' + lvl.label;
+                      if (lvl.meaning.length > seen[key].meaning.length) seen[key].meaning = lvl.meaning;
+                    } else {
+                      seen[key] = { ...lvl };
+                      deduped.push(seen[key]);
+                    }
+                  });
+                  const sorted = deduped.sort((a, b) => b.level - a.level);
+                  const rows = [];
+                  let spxInserted = false;
+                  sorted.forEach((level, i) => {
+                    if (!spxInserted && spx >= level.level) {
+                      rows.push({ type: 'spx', level: spx });
+                      spxInserted = true;
+                    }
+                    rows.push({ type: 'level', ...level, idx: i });
+                  });
+                  if (!spxInserted) rows.push({ type: 'spx', level: spx });
+
+                  const typeStyle = (label) => {
+                    if (label.includes('Strike')) return { border: 'border-cyan-500', text: 'text-cyan-400', bg: 'bg-cyan-500/5' };
+                    if (label.includes('Gamma')) return { border: 'border-purple-500', text: 'text-purple-400', bg: 'bg-purple-500/5' };
+                    if (label.includes('Put Wall')) return { border: 'border-emerald-500', text: 'text-emerald-400', bg: 'bg-emerald-500/5' };
+                    if (label.includes('Call Wall')) return { border: 'border-red-500', text: 'text-red-400', bg: 'bg-red-500/5' };
+                    if (label.includes('High')) return { border: 'border-amber-500', text: 'text-amber-400', bg: 'bg-amber-500/5' };
+                    if (label.includes('Low')) return { border: 'border-amber-500', text: 'text-amber-400', bg: 'bg-amber-500/5' };
+                    return { border: 'border-slate-600', text: 'text-slate-400', bg: '' };
+                  };
+
+                  return (
+                    <div className="bg-slate-800 border border-slate-700 rounded-lg p-4 shadow-xl">
+                      <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3" title="SPX price levels sorted high to low. Your current price is marked.">Key Levels</h3>
+                      <div className="space-y-0">
+                        {rows.map((row, i) => {
+                          if (row.type === 'spx') {
+                            return (
+                              <div key="spx" className="flex items-center gap-2 py-1.5 my-1 bg-emerald-900/30 border border-emerald-500/40 rounded px-3">
+                                <span className="font-mono font-bold text-emerald-400 w-16 text-sm">{row.level.toFixed(0)}</span>
+                                <span className="text-emerald-400 font-semibold text-xs uppercase tracking-wider">SPX Now</span>
+                                <span className="ml-auto text-emerald-500 text-[10px] animate-pulse">LIVE</span>
+                              </div>
+                            );
+                          }
+                          const s = typeStyle(row.label);
+                          const dist = Math.abs(spx - row.level);
+                          return (
+                            <div key={row.idx} className={`flex items-center gap-2 py-1 px-3 border-l-2 ${s.border} ${s.bg} cursor-help`} title={row.meaning}>
+                              <span className={`font-mono font-bold w-16 text-sm ${s.text}`}>{row.level.toFixed(0)}</span>
+                              <span className="text-slate-400 text-xs flex-1">{row.label}</span>
+                              <span className="text-slate-500 text-[11px] font-mono">{dist.toFixed(0)}pts</span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            );
+          })()}
+
+          {/* ===== LAYER 2: KEY EVIDENCE (collapsible, open by default) ===== */}
+          <button
+            onClick={() => setShowEvidence(prev => !prev)}
+            className="w-full flex items-center justify-between bg-slate-800/70 hover:bg-slate-800 border border-slate-700 rounded-lg px-5 py-3 transition-colors group"
+          >
+            <span className="text-sm font-semibold text-slate-400 uppercase tracking-wider group-hover:text-slate-200">Key Evidence</span>
+            <span className="text-slate-500 text-lg">{showEvidence ? '\u2212' : '+'}</span>
+          </button>
+          {showEvidence && telemetry && (
+            <div className="bg-slate-800 border border-slate-700 rounded-lg p-5 shadow-xl">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                {/* ER — Trend Strength */}
+                {(() => {
+                  const er = telemetry.er_value;
+                  const erPct = Math.min(100, (er || 0) * 100);
+                  const erLabel = er >= 0.50 ? 'Strong trend' : er >= 0.20 ? 'Weak signal' : er >= 0.10 ? 'Noise' : 'Dead';
+                  const erColor = er >= 0.50 ? 'bg-blue-500' : er >= 0.20 ? 'bg-emerald-500' : er >= 0.10 ? 'bg-amber-500' : 'bg-red-500';
+                  const erText = er >= 0.50 ? 'text-blue-400' : er >= 0.20 ? 'text-emerald-400' : er >= 0.10 ? 'text-amber-400' : 'text-red-400';
+                  const erDanger = er >= 0.50 && telemetry.directional_bias?.includes('BULL') && telemetry.market_insights?.position_cards?.some(c => c.type?.includes('Call'));
+                  const erDangerPut = er >= 0.50 && telemetry.directional_bias?.includes('BEAR') && telemetry.market_insights?.position_cards?.some(c => c.type?.includes('Put'));
+                  return (
+                    <div className={`p-3 rounded border ${(erDanger || erDangerPut) ? 'border-red-700/60 bg-red-900/10 ring-1 ring-red-500/30' : 'border-slate-700/50 bg-slate-900/50'}`} title="Efficiency Ratio: 0=pure noise, 1=perfect trend. Direction of ER matters most — rising ER means a real move is forming.">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-[11px] text-slate-500 font-semibold uppercase">Trend Strength (ER)</span>
+                        <span className={`text-sm font-bold font-mono ${erText}`}>{er?.toFixed(2)}</span>
+                      </div>
+                      <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden mb-1">
+                        <div className={`h-full rounded-full transition-all ${erColor}`} style={{ width: `${erPct}%` }}></div>
+                      </div>
+                      <div className={`text-[10px] ${erText}`}>{erLabel}{(erDanger || erDangerPut) ? ' — pushing toward your strikes!' : ''}</div>
+                    </div>
+                  );
+                })()}
+
+                {/* RSI — Momentum */}
+                {(() => {
+                  const rsi = telemetry.rsi_14;
+                  const rsiPct = rsi || 50;
+                  const isOverbought = rsi > 60;
+                  const isOversold = rsi < 40;
+                  const rsiLabel = rsi > 70 ? 'Overbought — reversal likely' : rsi > 60 ? 'Bullish — approaching overbought' : rsi < 30 ? 'Oversold — bounce likely' : rsi < 40 ? 'Bearish — approaching oversold' : 'Neutral';
+                  const rsiColor = isOverbought || isOversold ? 'bg-amber-500' : 'bg-slate-400';
+                  const rsiText = isOverbought ? 'text-amber-400' : isOversold ? 'text-amber-400' : 'text-slate-400';
+                  const rsiBorder = (isOverbought || isOversold) ? 'border-amber-700/60 bg-amber-900/10 ring-1 ring-amber-500/30' : 'border-slate-700/50 bg-slate-900/50';
+                  return (
+                    <div className={`p-3 rounded border ${rsiBorder}`} title="RSI (14): Below 30=oversold (bounce likely), above 70=overbought (pullback likely). 40-60=neutral. The user's key insight on May 26 was recognizing RSI overbought → reversal.">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-[11px] text-slate-500 font-semibold uppercase">Momentum (RSI)</span>
+                        <span className={`text-sm font-bold font-mono ${rsiText}`}>{rsi?.toFixed(0)}</span>
+                      </div>
+                      <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden mb-1 relative">
+                        <div className={`h-full rounded-full transition-all ${rsiColor}`} style={{ width: `${rsiPct}%` }}></div>
+                        <div className="absolute top-0 bottom-0 left-[40%] w-px bg-slate-600"></div>
+                        <div className="absolute top-0 bottom-0 left-[60%] w-px bg-slate-600"></div>
+                      </div>
+                      <div className={`text-[10px] ${rsiText}`}>{rsiLabel}</div>
+                    </div>
+                  );
+                })()}
+
+                {/* GEX — Dealer Positioning */}
+                {(() => {
+                  const gex = telemetry.gex_data;
+                  if (!gex || gex.gex_regime === 'UNAVAILABLE') return null;
+                  const isPos = gex.gex_regime === 'POSITIVE';
+                  const isNeg = gex.gex_regime === 'NEGATIVE';
+                  const magStr = gex.net_gex ? (Math.abs(gex.net_gex) >= 1e6 ? `${(gex.net_gex/1e6).toFixed(0)}M` : `${(gex.net_gex/1e3).toFixed(0)}K`) : 'N/A';
+                  return (
+                    <div className={`p-3 rounded border ${isNeg ? 'border-red-700/60 bg-red-900/10 ring-1 ring-red-500/30' : 'border-slate-700/50 bg-slate-900/50'}`} title="Gamma Exposure: POSITIVE=dealers buy dips & sell rallies (mean-reverting, caps moves). NEGATIVE=dealers amplify moves (trending, dangerous).">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-[11px] text-slate-500 font-semibold uppercase">Dealers (GEX)</span>
+                        <span className={`text-sm font-bold font-mono ${isPos ? 'text-emerald-400' : isNeg ? 'text-red-400' : 'text-slate-400'}`}>{magStr}</span>
+                      </div>
+                      <div className={`text-[10px] ${isPos ? 'text-emerald-400' : isNeg ? 'text-red-400' : 'text-slate-400'}`}>
+                        {isPos ? 'Mean-reverting — dealers cap rallies & buy dips' : isNeg ? 'Amplifying — dealers make moves bigger!' : 'Neutral positioning'}
+                      </div>
+                      {gex.gamma_wall_spx > 0 && (
+                        <div className="text-[10px] text-slate-500 mt-0.5">Gamma Wall: {gex.gamma_wall_spx} ({Math.abs((telemetry.spx_price || 0) - gex.gamma_wall_spx).toFixed(0)} pts {(telemetry.spx_price || 0) > gex.gamma_wall_spx ? 'below' : 'above'})</div>
+                      )}
+                    </div>
+                  );
+                })()}
+
+                {/* Range Position */}
+                {(() => {
+                  const rp = telemetry.range_position;
+                  const dayH = telemetry.day_high_spx;
+                  const dayL = telemetry.day_low_spx;
+                  const rpLabel = rp >= 90 ? 'At day high — upside exhausted?' : rp <= 10 ? 'At day low — downside exhausted?' : rp >= 70 ? 'Near high' : rp <= 30 ? 'Near low' : 'Mid-range';
+                  const rpColor = (rp >= 85 || rp <= 15) ? 'text-amber-400' : 'text-slate-400';
+                  const rpBorder = (rp >= 85 || rp <= 15) ? 'border-amber-700/60 bg-amber-900/10 ring-1 ring-amber-500/30' : 'border-slate-700/50 bg-slate-900/50';
+                  return (
+                    <div className={`p-3 rounded border ${rpBorder}`} title="Where SPX sits within today's range. 0%=day low, 100%=day high. Extremes (>85% or <15%) suggest the current direction may be exhausted.">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-[11px] text-slate-500 font-semibold uppercase">Day Range</span>
+                        <span className={`text-sm font-bold font-mono ${rpColor}`}>{rp?.toFixed(0)}%</span>
+                      </div>
+                      <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden mb-1 relative">
+                        <div className="h-full rounded-full transition-all bg-slate-400" style={{ width: `${rp || 0}%` }}></div>
+                      </div>
+                      <div className="flex justify-between text-[9px] text-slate-600">
+                        <span>{dayL?.toFixed(0)}</span>
+                        <span className={`${rpColor} text-[10px]`}>{rpLabel}</span>
+                        <span>{dayH?.toFixed(0)}</span>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                {/* Smart Moat */}
+                {(() => {
+                  const moat = telemetry.effective_moat_min;
+                  const positions = telemetry.market_insights?.position_cards || [];
+                  const closestMoat = positions.length > 0 ? Math.min(...positions.map(p => p.moat || 999)) : null;
+                  const safe = closestMoat == null || closestMoat >= moat;
+                  return (
+                    <div className={`p-3 rounded border ${!safe ? 'border-amber-700/60 bg-amber-900/10 ring-1 ring-amber-500/30' : 'border-slate-700/50 bg-slate-900/50'}`} title="Smart Moat = minimum safe distance (pts) between SPX and your strike. If any position is closer than this, it's in the warning zone.">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-[11px] text-slate-500 font-semibold uppercase">Smart Moat</span>
+                        <span className="text-sm font-bold font-mono text-slate-200">{moat} pts</span>
+                      </div>
+                      {closestMoat != null ? (
+                        <div className={`text-[10px] ${safe ? 'text-emerald-400' : 'text-amber-400'}`}>
+                          {safe ? `Closest position: ${closestMoat?.toFixed(0)} pts away ✓` : `⚠ Closest position: ${closestMoat?.toFixed(0)} pts — below ${moat} pt minimum!`}
+                        </div>
+                      ) : (
+                        <div className="text-[10px] text-slate-500">No open positions</div>
+                      )}
+                    </div>
+                  );
+                })()}
+
+                {/* VIX / Expected Move */}
+                {telemetry.expected_move && (() => {
+                  const em = telemetry.expected_move;
+                  const vixLevel = em.vix > 25 ? 'Fear' : em.vix > 18 ? 'Elevated' : 'Calm';
+                  const vixColor = em.vix > 25 ? 'text-red-400' : em.vix > 18 ? 'text-amber-400' : 'text-emerald-400';
+                  const vixBorder = em.vix > 25 ? 'border-red-700/60 bg-red-900/10 ring-1 ring-red-500/30' : 'border-slate-700/50 bg-slate-900/50';
+                  return (
+                    <div className={`p-3 rounded border ${vixBorder}`} title="VIX measures implied volatility. Higher VIX = wider expected moves = riskier for credit spreads. 1σ = 68% probability SPX stays within range.">
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-[11px] text-slate-500 font-semibold uppercase">Volatility (VIX)</span>
+                        <span className={`text-sm font-bold font-mono ${vixColor}`}>{em.vix?.toFixed(1)}</span>
+                      </div>
+                      <div className={`text-[10px] ${vixColor}`}>{vixLevel} — 1σ move: ±{em.expected_1sigma} pts</div>
+                      {em.move_consumed_pct != null && em.move_consumed_pct > 0.3 && (
+                        <div className="text-[10px] text-slate-500 mt-0.5">{(em.move_consumed_pct * 100).toFixed(0)}% of expected move already consumed</div>
+                      )}
+                    </div>
+                  );
+                })()}
+              </div>
+            </div>
+          )}
+
+          {/* ===== RAW DASHBOARD (collapsible, collapsed by default) ===== */}
+          <button
+            onClick={() => setShowRaw(prev => !prev)}
+            className="w-full flex items-center justify-between bg-slate-800/70 hover:bg-slate-800 border border-slate-700 rounded-lg px-5 py-3 transition-colors group"
+          >
+            <span className="text-sm font-semibold text-slate-400 uppercase tracking-wider group-hover:text-slate-200">Raw Dashboard</span>
+            <span className="text-slate-500 text-lg">{showRaw ? '\u2212' : '+'}</span>
+          </button>
+          {showRaw && (
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2 space-y-6">
 
+            {/* ── PRICE & TREND ── */}
+            <div className="text-[10px] text-slate-600 font-bold uppercase tracking-widest">Price &amp; Trend</div>
             <div className="bg-slate-800 border border-slate-700 rounded-lg p-6 shadow-xl">
               <div className="flex justify-between items-end border-b border-slate-700 pb-2 mb-4">
                 <h2 className="text-xl font-semibold text-slate-300">Live Telemetry</h2>
@@ -210,14 +584,14 @@ export default function App() {
                 <p className="text-slate-400 animate-pulse">Initializing data streams...</p>
               ) : telemetry ? (
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                  <MetricCard title="Data Source" value={telemetry.symbol} color="text-emerald-400 text-sm" />
-                  <MetricCard title="SPY Spot" value={`$${telemetry.current_price}`} />
-                  <MetricCard title="EMA 9" value={telemetry.ema_9} color={telemetry.current_price > telemetry.ema_9 ? "text-emerald-400" : "text-red-400"} />
-                  <MetricCard title="EMA 21" value={telemetry.ema_21} color={telemetry.current_price > telemetry.ema_21 ? "text-emerald-400" : "text-red-400"} />
-                  <MetricCard title="RSI (14)" value={telemetry.rsi_14} color={telemetry.rsi_14 > 60 || telemetry.rsi_14 < 40 ? "text-amber-400" : "text-slate-200"} />
-                  <MetricCard title="CHOP (14)" value={telemetry.chop_value} color={telemetry.chop_value > 61.8 ? "text-red-400" : "text-emerald-400"} />
-                  <MetricCard title="Efficiency (ER)" value={telemetry.er_value} color={telemetry.er_value < 0.20 ? "text-red-400" : "text-emerald-400"} />
-                  <MetricCard title="VWAP Deviation" value={`${telemetry.vwap_dev}%`} color={telemetry.vwap_dev > 0.35 ? "text-amber-400 font-extrabold animate-pulse" : "text-emerald-400"} />
+                  <MetricCard title="Data Source" value={telemetry.symbol} color="text-emerald-400 text-sm" tooltip="The data feed provider and ticker used for indicator calculations" />
+                  <MetricCard title="SPY Spot" value={`$${telemetry.current_price}`} tooltip="Current SPY ETF price. SPX ≈ SPY × 10 (not exact due to dividend drift)" />
+                  <MetricCard title="EMA 9" value={telemetry.ema_9} color={telemetry.current_price > telemetry.ema_9 ? "text-emerald-400" : "text-red-400"} tooltip="9-period Exponential Moving Average. Green = price above (bullish), Red = price below (bearish). Fast-moving trend indicator." />
+                  <MetricCard title="EMA 21" value={telemetry.ema_21} color={telemetry.current_price > telemetry.ema_21 ? "text-emerald-400" : "text-red-400"} tooltip="21-period Exponential Moving Average. Slower trend. When EMA9 and EMA21 are compressed (<0.05%), the market is indecisive." />
+                  <MetricCard title="RSI (14)" value={telemetry.rsi_14} color={telemetry.rsi_14 > 60 || telemetry.rsi_14 < 40 ? "text-amber-400" : "text-slate-200"} tooltip={`RSI ${telemetry.rsi_14?.toFixed(0)}: Below 30=oversold (likely bounce), above 70=overbought (likely pullback). 40-60=neutral zone. Used for reversal detection.`} />
+                  <MetricCard title="CHOP (14)" value={telemetry.chop_value} color={telemetry.chop_value > 61.8 ? "text-red-400" : "text-emerald-400"} tooltip={`Choppiness Index ${telemetry.chop_value?.toFixed(0)}: Above 61.8=choppy/sideways market (good for credit spreads). Below 38.2=strong trend (dangerous). Red=choppy, Green=trending.`} />
+                  <MetricCard title="Efficiency (ER)" value={telemetry.er_value} color={telemetry.er_value < 0.20 ? "text-red-400" : "text-emerald-400"} tooltip={`Efficiency Ratio ${telemetry.er_value?.toFixed(2)}: 0=pure noise (choppy), 1=perfectly trending. Below 0.10=dead market, 0.10-0.20=weak signal, above 0.40=strong directional move.`} />
+                  <MetricCard title="VWAP Deviation" value={`${telemetry.vwap_dev}%`} color={telemetry.vwap_dev > 0.35 ? "text-amber-400 font-extrabold animate-pulse" : "text-emerald-400"} tooltip={`VWAP Deviation ${telemetry.vwap_dev}%: How far price is from the Volume-Weighted Average Price. Above 0.35%=price stretched away from institutional fair value (may snap back). Pulsing=overextended.`} />
                 </div>
               ) : null}
             </div>
@@ -252,9 +626,9 @@ export default function App() {
                 </div>
                 <div className="bg-slate-900/60 rounded p-3 border border-slate-700/50">
                   <div className="flex justify-between text-xs text-slate-400 mb-1">
-                    <span>Day Low: <span className="text-red-400 font-bold">{telemetry.day_low_spx.toFixed(2)}</span></span>
-                    <span>Range: {telemetry.range_position.toFixed(0)}%</span>
-                    <span>Day High: <span className="text-emerald-400 font-bold">{telemetry.day_high_spx.toFixed(2)}</span></span>
+                    <span title="Lowest SPX price today. Acts as intraday support.">Day Low: <span className="text-red-400 font-bold">{telemetry.day_low_spx.toFixed(2)}</span></span>
+                    <span title="Where SPX sits within today's range. 0%=at day low, 50%=midpoint, 100%=at day high. Used for moat/risk calculations.">Range: {telemetry.range_position.toFixed(0)}%</span>
+                    <span title="Highest SPX price today. Acts as intraday resistance.">Day High: <span className="text-emerald-400 font-bold">{telemetry.day_high_spx.toFixed(2)}</span></span>
                   </div>
                   <div className="relative w-full bg-slate-800 rounded-full h-3">
                     <div className="absolute left-0 top-0 bg-gradient-to-r from-red-600 via-slate-500 to-emerald-600 h-3 rounded-full w-full opacity-30"></div>
@@ -346,6 +720,8 @@ export default function App() {
               </div>
             )}
 
+            {/* ── RISK, REGIME & DIRECTIVES ── */}
+            <div className="text-[10px] text-slate-600 font-bold uppercase tracking-widest mt-2">Risk, Regime &amp; Directives</div>
             {telemetry && (
               <div className={`border rounded-lg p-6 shadow-xl ${telemetry.continuous_score > 2.5 ? 'bg-red-900/20 border-red-700/50' : telemetry.continuous_score > 1.5 ? 'bg-amber-900/20 border-amber-700/50' : 'bg-emerald-900/20 border-emerald-700/50'}`}>
                 <div className="flex justify-between items-center mb-4">
@@ -366,8 +742,8 @@ export default function App() {
                   </div>
                   <div className="bg-slate-900/50 p-4 rounded border border-slate-700/50">
                     <div className="flex justify-between items-center mb-2">
-                      <span className="text-slate-400 font-medium">Smart Moat:</span>
-                      <span className="font-bold text-lg text-slate-100">{telemetry.effective_moat_min} pts</span>
+                      <span className="text-slate-400 font-medium" title="The Smart Moat is the minimum safe distance (in SPX points) between price and your closest strike. Computed from 7 factors: range width, signal quality, time remaining, exhaustion, calendar events, GEX regime, and move consumed.">Smart Moat:</span>
+                      <span className="font-bold text-lg text-slate-100" title={`${telemetry.effective_moat_min} pts = any position closer than this to SPX is in the WARNING zone`}>{telemetry.effective_moat_min} pts</span>
                     </div>
                     {telemetry.smart_moat_data && (
                       <div>
@@ -397,11 +773,11 @@ export default function App() {
                     )}
                   </div>
                   <div className="flex justify-between items-center bg-slate-900/50 p-4 rounded border border-slate-700/50">
-                    <span className="text-slate-400 font-medium">Stop-Loss Protocol:</span>
-                    <span className="font-bold text-lg text-slate-100">{telemetry.stop_loss_rule}</span>
+                    <span className="text-slate-400 font-medium" title="How to handle stop-losses for 0DTE credit spreads. 'Strict Asset Boundary' means only close if SPX actually breaches your strike — ignore premium spikes from IV.">Stop-Loss Protocol:</span>
+                    <span className="font-bold text-lg text-slate-100" title="Ignore premium fluctuations. Only act on actual price breaching your strike level.">{telemetry.stop_loss_rule}</span>
                   </div>
                   <div className="bg-slate-900/50 p-4 rounded border border-slate-700/50">
-                    <div className="text-xs text-slate-400 font-semibold uppercase tracking-wider mb-2">Indicator Intensity (0 = trending, 1 = max chop)</div>
+                    <div className="text-xs text-slate-400 font-semibold uppercase tracking-wider mb-2" title="Each bar shows how much that indicator contributes to the regime score. 0=clean trend, 1=maximum choppiness. The 4 scores are averaged to produce the continuous regime score.">Indicator Intensity (0 = trending, 1 = max chop)</div>
                     <div className="space-y-2">
                       <IntensityBar label="CHOP" value={telemetry.sub_scores.chop_intensity} />
                       <IntensityBar label="ER" value={telemetry.sub_scores.er_intensity} />
@@ -445,10 +821,10 @@ export default function App() {
                   {/* --- VIX / EXPECTED MOVE --- */}
                   {telemetry.expected_move && telemetry.expected_move.vix && (
                     <div className="bg-slate-900/50 p-4 rounded border border-slate-700/50">
-                      <div className="text-xs text-slate-400 font-semibold uppercase tracking-wider mb-2">VIX Expected Move</div>
+                      <div className="text-xs text-slate-400 font-semibold uppercase tracking-wider mb-2" title="How far SPX is statistically likely to move before close, based on VIX implied volatility. 1σ=68% chance price stays within, 2σ=95% chance.">VIX Expected Move</div>
                       <div className="grid grid-cols-3 gap-3 text-sm">
                         <div>
-                          <span className="text-slate-500 text-xs">VIX</span>
+                          <span className="text-slate-500 text-xs" title="CBOE Volatility Index. Below 15=calm, 15-20=normal, 20-25=elevated, 25+=fear. Higher VIX = wider expected moves.">VIX</span>
                           <div className={`font-bold ${telemetry.expected_move.vix > 25 ? 'text-red-400' : telemetry.expected_move.vix > 18 ? 'text-amber-400' : 'text-emerald-400'}`}>
                             {telemetry.expected_move.vix}
                           </div>
@@ -466,21 +842,21 @@ export default function App() {
                       </div>
                       <div className="grid grid-cols-3 gap-3 text-sm mt-2">
                         <div>
-                          <span className="text-slate-500 text-xs">1σ Move</span>
+                          <span className="text-slate-500 text-xs" title="1-sigma expected move: 68% probability SPX stays within this range. If your strike is farther than this from SPX, you're statistically safe.">1σ Move</span>
                           <div className="font-bold text-blue-400">±{telemetry.expected_move.expected_1sigma} pts</div>
                         </div>
                         <div>
-                          <span className="text-slate-500 text-xs">2σ Move</span>
+                          <span className="text-slate-500 text-xs" title="2-sigma expected move: 95% probability SPX stays within this range. A move beyond 2σ is a tail event (rare but devastating).">2σ Move</span>
                           <div className="font-bold text-amber-400">±{telemetry.expected_move.expected_2sigma} pts</div>
                         </div>
                         <div>
-                          <span className="text-slate-500 text-xs">Rec Moat</span>
+                          <span className="text-slate-500 text-xs" title="VIX-recommended minimum distance between SPX and your strike (1.5σ). This is the 'base moat' before Smart Moat adjustments.">Rec Moat</span>
                           <div className="font-bold text-emerald-400">{telemetry.expected_move.recommended_moat} pts</div>
                         </div>
                       </div>
                       {telemetry.realized_distribution && (
                         <div className="mt-3 pt-3 border-t border-slate-700/50">
-                          <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1.5">Reality Check ({telemetry.realized_distribution.lookback_days}d)</div>
+                          <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1.5" title={`How often SPX actually moved beyond each threshold over the last ${telemetry.realized_distribution.lookback_days} trading days. Compares VIX-implied moves against real history.`}>Reality Check ({telemetry.realized_distribution.lookback_days}d)</div>
                           <div className="grid grid-cols-4 gap-1.5 text-xs">
                             {['0.5', '1.0', '1.5', '2.0'].map(t => {
                               const pct = telemetry.realized_distribution.exceedance?.[`pct_over_${t}`] || 0;
@@ -624,13 +1000,31 @@ export default function App() {
                       </div>
                       {telemetry.gex_data.top_levels && telemetry.gex_data.top_levels.length > 0 && (
                         <div className="border-t border-slate-700/50 pt-2">
-                          <div className="text-[10px] text-slate-500 mb-1">Top GEX Levels (SPX)</div>
-                          <div className="flex flex-wrap gap-1">
-                            {telemetry.gex_data.top_levels.map((lvl, i) => (
-                              <span key={i} className="text-[10px] font-mono bg-slate-800 text-slate-300 px-1.5 py-0.5 rounded border border-slate-700">
-                                {lvl.strike_spx}
-                              </span>
-                            ))}
+                          <div className="text-[10px] text-slate-500 mb-2" title="Strikes with the largest gamma exposure. Higher gamma = more dealer hedging activity = stronger magnet/wall. These are where massive order volume sits.">Top GEX Levels — Order Volume by Strike</div>
+                          <div className="space-y-0.5">
+                            {[...telemetry.gex_data.top_levels]
+                              .sort((a, b) => Math.abs(b.gex) - Math.abs(a.gex))
+                              .map((lvl, i) => {
+                                const mag = Math.abs(lvl.gex);
+                                const maxMag = Math.max(...telemetry.gex_data.top_levels.map(l => Math.abs(l.gex)), 1);
+                                const barPct = Math.min(100, (mag / maxMag) * 100);
+                                const magStr = mag >= 1e6 ? `${(mag/1e6).toFixed(1)}M` : `${(mag/1e3).toFixed(0)}K`;
+                                const spx = telemetry.spx_price || 0;
+                                const dist = lvl.strike_spx - spx;
+                                const distStr = dist > 0 ? `+${dist.toFixed(0)}` : dist.toFixed(0);
+                                const isNear = Math.abs(dist) < 20;
+                                return (
+                                  <div key={i} className={`flex items-center gap-2 py-0.5 px-1.5 rounded text-[11px] ${isNear ? 'bg-amber-900/20' : ''}`}
+                                    title={`SPX ${lvl.strike_spx}: ${magStr} gamma exposure. ${Math.abs(dist).toFixed(0)} pts ${dist > 0 ? 'above' : 'below'} current price. Call OI: ${lvl.call_oi?.toLocaleString()}, Put OI: ${lvl.put_oi?.toLocaleString()}`}>
+                                    <span className={`font-mono font-bold w-12 ${isNear ? 'text-amber-400' : 'text-slate-200'}`}>{lvl.strike_spx}</span>
+                                    <div className="flex-1 h-2 bg-slate-800 rounded-full overflow-hidden">
+                                      <div className={`h-full rounded-full ${lvl.gex > 0 ? 'bg-emerald-500/60' : 'bg-red-500/60'}`} style={{ width: `${barPct}%` }}></div>
+                                    </div>
+                                    <span className={`font-mono font-bold w-12 text-right ${lvl.gex > 0 ? 'text-emerald-400' : 'text-red-400'}`}>{magStr}</span>
+                                    <span className="text-slate-600 font-mono w-10 text-right">{distStr}</span>
+                                  </div>
+                                );
+                              })}
                           </div>
                         </div>
                       )}
@@ -664,7 +1058,7 @@ export default function App() {
                 telemetry.intraday_pl.total_pl >= 0 ? 'bg-emerald-900/20 border-emerald-700/50' : 'bg-red-900/20 border-red-700/50'
               }`}>
                 <div className="flex justify-between items-center">
-                  <span className="text-xs text-slate-400 uppercase tracking-wider font-semibold">Day P/L</span>
+                  <span className="text-xs text-slate-400 uppercase tracking-wider font-semibold" title="Combined estimated profit/loss for all positions today. Includes closed trades (realized) + open positions (estimated via premium decay model). Rough approximation — not real options pricing.">Day P/L</span>
                   <span className={`text-lg font-bold ${telemetry.intraday_pl.total_pl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                     {telemetry.intraday_pl.total_pl >= 0 ? '+' : ''}${telemetry.intraday_pl.total_pl.toFixed(2)}
                   </span>
@@ -687,7 +1081,7 @@ export default function App() {
             {/* --- SYSTEM ACCURACY (shown only when sufficient data) --- */}
             {telemetry?.accuracy_stats?.data_sufficient && (
               <div className="mb-4 bg-slate-900/80 rounded-lg p-3 border border-slate-700">
-                <div className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">System Accuracy (Live Tracking)</div>
+                <div className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2" title="Tracks whether the system's exit/hold signals were correct based on actual outcomes. Exit accuracy = % of exit signals that fired on losing trades. Hold accuracy = % of hold signals on winning trades.">System Accuracy (Live Tracking)</div>
                 <div className="grid grid-cols-2 gap-3 text-center">
                   <div>
                     <div className="text-[10px] text-slate-500">Exit Signal Accuracy</div>
@@ -1142,6 +1536,9 @@ export default function App() {
                 </div>
               )}
             </div>
+          )}
+
+        </div>
           )}
 
         </div>
@@ -1729,9 +2126,9 @@ export default function App() {
   );
 }
 
-function MetricCard({ title, value, color = "text-slate-100", alert = null }) {
+function MetricCard({ title, value, color = "text-slate-100", alert = null, tooltip = null }) {
   return (
-    <div className={`bg-slate-900/80 p-4 rounded border ${alert ? 'border-amber-700/50' : 'border-slate-700'} relative group`}>
+    <div className={`bg-slate-900/80 p-4 rounded border ${alert ? 'border-amber-700/50' : 'border-slate-700'} relative group ${tooltip ? 'cursor-help' : ''}`} title={tooltip || undefined}>
       <div className="text-slate-400 text-xs font-semibold uppercase tracking-wider mb-1">
         {title}
         {alert && <span className="ml-1.5 text-amber-400 cursor-help inline-block animate-pulse">⚠</span>}

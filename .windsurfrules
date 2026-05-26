@@ -1,0 +1,155 @@
+# 0DTE Quant Engine — AI Agent Rules & Notes
+# This file is automatically loaded by Windsurf at the start of every session.
+# Keep it updated with hard-won knowledge, gotchas, and conventions.
+# Last updated: 2026-05-27 (Phase 3 UI overhaul complete)
+
+## MANDATORY AGENT RULES
+
+1. **AUTO-UPDATE THIS FILE**: Whenever you discover a new gotcha, implement a new feature, fix a bug, or learn something the hard way — **immediately update this `.windsurfrules` file** before ending your response. Add it to the appropriate section (KNOWN PITFALLS, ALGORITHM VERSION HISTORY, etc.). Update the "Last updated" date above.
+2. **ALWAYS READ THIS FILE FIRST**: At the start of every task, refer to this file for environment, conventions, and known pitfalls. Do NOT guess Python paths, SPX behavior, or function signatures — check here.
+3. **KEEP DOCS IN SYNC**: When implementing a new feature or changing algo behavior:
+   - Update `docs/Algorithm_States.md` — add changelog entry, update version number, update relevant sections.
+   - Update `docs/User_Manual.md` — if the change affects what the user sees on the dashboard.
+   - Update `readme.md` — if the change affects setup, environment, or test count.
+   - Update test count in this file if tests are added/removed.
+4. **NEVER SILENTLY SWALLOW ERRORS**: If you encounter a new API quirk, data format issue, or environment problem, log it in KNOWN PITFALLS below with the fix.
+5. **VERIFY BEFORE CODING**: Before editing `engine.py`, `data_fetcher.py`, or `main.py`, re-read the KEY DATA FLOW and relevant function signatures below. Do not assume parameter lists from memory.
+
+## ENVIRONMENT
+
+- **Python**: `/Users/ativ.aggarwal/miniconda3/envs/mark/bin/python` (Python 3.13)
+- **Conda env**: `mark` (NOT `0dte_env`, the readme is outdated)
+- **NEVER use** `/usr/bin/python3` (system Python 3.9, missing all dependencies)
+- **Run tests**: `/Users/ativ.aggarwal/miniconda3/envs/mark/bin/python -m pytest test_engine.py -v --tb=short`
+- **Start backend**: `/Users/ativ.aggarwal/miniconda3/envs/mark/bin/python -m uvicorn main:app --reload` from `backend/`
+- **Start frontend**: `npm run dev` from `frontend/`
+- **Test count**: 18 tests as of Phase 16 (3 original + 15 Phase 16). All must pass before any PR.
+
+## PROJECT STRUCTURE
+
+```
+mark/
+├── backend/
+│   ├── main.py            # FastAPI endpoints, telemetry pipeline orchestrator
+│   ├── engine.py           # Core algo: regime, smart moat, positions, recs (~2600 lines)
+│   ├── data_fetcher.py     # Alpaca, Yahoo, ThetaData, VIX, GEX fetchers
+│   ├── config.py           # All thresholds and constants
+│   ├── database.py         # SQLAlchemy models (PositionDB, ClosedPositionDB)
+│   ├── accuracy_tracker.py # Recommendation accuracy logging
+│   ├── backtester.py       # Historical trade backtester
+│   ├── test_engine.py      # Unit tests
+│   └── requirements.txt
+├── frontend/
+│   └── src/app.jsx         # Single-file React dashboard (Tailwind v4)
+├── docs/
+│   ├── Algorithm_States.md # Algo spec & version log (V5.5+)
+│   ├── User_Manual.md      # Dashboard user guide
+│   └── trading_log_*.md    # Daily trading session logs
+├── tradehistory/           # Robinhood CSV exports
+└── readme.md               # Setup guide (NEEDS UPDATE — still says Python 3.9)
+```
+
+## KEY DATA FLOW (Telemetry Endpoint)
+
+```
+GET /api/telemetry →
+  1. fetch_alpaca_market_data("SPY") → DataFrame + live_price
+  2. Calculate TA indicators (EMA, RSI, CHOP, ER, VWAP)
+  3. analyze_market_regime(df) → regime_data
+  4. fetch_spx_live_price() → spx_price (Yahoo ^GSPC, SPY fallback)
+  5. fetch_spx_day_range() → day_high, day_low, day_open (Yahoo ^GSPC)
+  6. fetch_vix_data() → VIX + VIX9D
+  7. compute_expected_move() → 1σ, 2σ, conditional σ, recommended moat
+  8. fetch_gex_data() → GEX regime, walls
+  9. compute_smart_moat() → 7-factor adjusted moat
+  10. evaluate_positions() → per-position moat, status, exit strategy, reversal score
+  11. generate_recommendations() → prioritized action items
+```
+
+## SPX / SPY CRITICAL GOTCHAS
+
+- **SPX is not directly available from Alpaca.** We use SPY as data proxy for indicators.
+- **SPX live price**: Fetched from Yahoo Finance `^GSPC` via `fetch_spx_live_price()`. Falls back to `SPY × SPX_PROXY_MULTIPLIER` (default 10.0).
+- **SPX day range**: Fetched from Yahoo `^GSPC` via `fetch_spx_day_range()`. Falls back to SPY × ratio.
+- **SPX/SPY ratio DRIFTS over time** due to dividends and expense ratio. At SPX ~7500, a 0.1% drift = ~7.5 pts — this is significant when GAMMA_TRAP_THRESHOLD is only 10 pts.
+- **NEVER assume SPX = SPY × 10 exactly.** Always use the dynamically computed `spx_spy_ratio` from main.py.
+- **SPX day open**: Added in Phase 16 from Yahoo `fast_info.get("open")`. Used for move-consumed calculations.
+
+## CODING CONVENTIONS
+
+- **Timestamps**: Always Central Time (CT / UTC-5 or UTC-6) for user-facing display. Backend uses UTC internally.
+- **Estimated values**: Always prefix with `~` or `Est.` in the UI. The buyback model is a rough IV proxy, NOT Black-Scholes.
+- **No emojis** in code unless user explicitly requests.
+- **No dollar figures without caveats** if confidence is low (estimated_pl, estimated_buyback).
+- **Comments**: Do not add or delete existing comments unless asked. Follow existing style.
+- **Imports**: Always at top of file. Never import mid-file.
+- **Config constants**: All thresholds live in `config.py`. Never hardcode magic numbers in engine.py.
+
+## KNOWN PITFALLS & LESSONS LEARNED
+
+1. **Yahoo `fast_info` field names vary**: Sometimes `dayHigh` vs `day_high`, `lastPrice` vs `last_price`. Always check both with `or`.
+2. **SQLite strips timezone info**: When reading `breach_start_time` from DB, always call `.replace(tzinfo=timezone.utc)` if tzinfo is None.
+3. **Alpaca bars are SPY, not SPX**: All TA indicators (RSI, CHOP, ER, VWAP) are computed on SPY prices. Only the moat/strike math uses SPX.
+4. **Premium estimation is NOT accurate**: The buyback fraction model is a heuristic. It overestimates in low-vol and underestimates during sharp moves. Always label as approximate.
+5. **GEX data from ThetaData can be stale**: Cache TTL is 120s. If ThetaData is down, `gex_data` will be None — all GEX-dependent code must handle None gracefully.
+6. **Pydantic schemas must match engine return dicts**: If you add a field to `compute_smart_moat()` output, you MUST also add it to the `SmartMoat` class in main.py (with a default value for backward compat).
+7. **`evaluate_positions` takes a SQLAlchemy session**: It commits breach_start_time changes directly. Mock it in tests with `MagicMock()`.
+8. **Recommendation persistence state is global**: `_rec_state`, `_escalation_state`, etc. are module-level dicts. Call `clear_rec_state()` between test cases to avoid cross-contamination.
+9. **Frontend is a single file**: `app.jsx` is the entire React app (~2000+ lines). No component decomposition yet.
+10. **Range position can be 0-100**: 0% = at day low, 100% = at day high, 50% = midpoint. Used extensively in moat/risk calculations.
+11. **Config imports are explicit**: engine.py uses `from config import ...` with named imports. If you reference a new config constant, you MUST add it to the import list. `SAFE_ZONE_THRESHOLD` (25) = `WARNING_ZONE_THRESHOLD` (25) — same value, different semantic intent.
+
+## ALGORITHM VERSION HISTORY (Key milestones)
+
+- **V3.2**: Regime classification, position evaluation, range proximity risk
+- **V4.0**: VIX expected move moats, intraday windows, regime transition, calendar events
+- **V5.0**: GEX deep integration (6th smart moat factor), trade analyzer, backtester
+- **V5.5**: Moat hysteresis, graduated exit escalation, premium history, breakeven detection
+- **Phase 16**: Conditional expected move (C1), reversal-aware exits (C2), time-adjusted take profit (C3), move-consumed smart moat (C4), momentum label fix (#37)
+- **Phase 2 UI (current)**: Insights tab with traffic lights, market story, position cards, heat scores, key levels. Two-tab layout (Insights + Dashboard).
+
+## SMART MOAT: 7 MULTIPLICATIVE FACTORS
+
+```
+combined = range × signal × time × exhaustion × event × gex × move_consumed
+```
+
+1. **Range**: TIGHT (×0.70) → NORMAL (×1.0) → EXPANDING (×1.15)
+2. **Signal quality**: DEAD (×0.80) → NOISE (×0.90) → WEAK (×1.0) → DIRECTIONAL (×1.10)
+3. **Time decay**: 1h→×0.55, 2h→×0.65, 3h→×0.75, 4.5h→×0.85, >4.5h→×1.0
+4. **Range exhaustion**: mid_zone AND tested_both AND range>30 → ×0.90
+5. **Calendar events**: FOMC ×1.40, CPI/NFP ×1.30, Quarterly OPEX ×1.50
+6. **GEX regime**: POSITIVE ×0.85-0.95, NEGATIVE ×1.10-1.25
+7. **Move consumed** (Phase 16): >0.3σ consumed → ×0.80-0.65
+
+## PHASE 2 UI — COMPLETED
+
+- `generate_market_insights()` in engine.py — produces market_light, market_story, position_cards, key_levels, action_items
+- `_compute_heat_score()` in engine.py — 0-100 danger score per position (5 factors: moat, bias, GEX, ER, time)
+- `MarketInsights` + sub-schemas in main.py — InsightPositionCard (with `context` field), InsightKeyLevel, InsightActionItem
+- **Tooltips on everything**: Every metric, score, and badge has plain-English hover tooltip.
+- **GEX wall strength + badge + volume table**: Magnitude bars, sorted by gamma, nearby highlighted.
+- **Position card context**: "SPX needs to rise 45 pts to reach your strike. Today's range is only 38 pts — very unlikely."
+- **Key Levels dedup + vertical ladder**: Single column sorted high→low with SPX NOW marker.
+
+## PHASE 3 UI — COMPLETED (Full Overhaul)
+
+- **Sticky header bar**: Persistent bar at top: SPX price, regime, bias, smart moat, GEX regime+magnitude, time remaining, CT clock. Always visible when scrolling. Uses `sticky top-0 z-30`.
+- **Layer flip (A)**: Narrative on TOP (open by default), Raw Dashboard BELOW (collapsed by default). Users see the story first, data second. `showRaw` state defaults to `false`.
+- **Key Evidence layer (B)**: NEW middle section with 6 curated indicators: ER (trend strength + visual bar), RSI (momentum + zone labels + reversal warning), GEX (dealer positioning + gamma wall distance), Day Range (position in range + endpoints), Smart Moat (vs closest position), VIX (volatility level + move consumed %).
+- **Attention system (F)**: Evidence cards get dynamic `ring-1 ring-red-500/30` borders when in dangerous states (ER pushing toward strikes, RSI extreme, GEX negative, range extreme, moat breached, VIX high). Built into Evidence layer.
+- **Position management in narrative (D)**: Close/Delete buttons added directly to narrative position cards. Users manage positions from Layer 1 without opening the raw dashboard. Uses existing `closePosition(card.id)` and `deletePosition(card.id)` handlers.
+- **Quick Add button**: "+ Add Position / Analyze Trade" button in narrative that opens the raw dashboard.
+- **Raw dashboard grouping (C)**: Section headers ("Price & Trend", "Risk, Regime & Directives") within the raw dashboard for visual organization.
+- **3-layer architecture**: Layer 1 = Narrative (story + positions + key levels), Layer 2 = Evidence (curated indicators), Layer 3 = Raw Dashboard (full data). Progressive disclosure from conclusions → reasoning → raw data.
+
+## WHAT'S NEXT (Phase 4 — Backend State + Trends)
+
+- Backend telemetry snapshot ring buffer (store last 5-10 snapshots in memory)
+- ER Trend Arrow (#29): "0.31 ▼▼ (was 0.60)" with color coding
+- GEX Magnitude Trend (#36): "71M ▲ (was 17M)" with color coding
+- "What Changed" delta panel: 3-4 badges showing biggest changes since last refresh
+- GEX Wall Proximity in Position Cards (#26): "Gamma Wall 7518: 37 pts below your 7555 strike"
+- RSI Reversal Warning Badge (#35): "Overbought — reversal likely" on RSI card + story
+- Explain Mode toggle (inline tooltips on technical terms)
+- See trading_log_2026-05-26.md for full phased plan

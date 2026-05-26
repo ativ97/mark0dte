@@ -11,7 +11,7 @@ _spx_cache = {"price": None, "fetched_at": None}
 SPX_CACHE_TTL_SECONDS = 60  # Re-fetch from Yahoo at most once per minute
 
 # --- SPX DAY RANGE CACHE ---
-_spx_range_cache = {"day_high": None, "day_low": None, "fetched_at": None}
+_spx_range_cache = {"day_high": None, "day_low": None, "day_open": None, "fetched_at": None}
 SPX_RANGE_CACHE_TTL_SECONDS = 30  # Day high/low can change fast
 
 # --- VIX CACHE ---
@@ -81,6 +81,7 @@ def fetch_spx_day_range(spy_day_high: float = None, spy_day_low: float = None,
         return {
             "day_high_spx": _spx_range_cache["day_high"],
             "day_low_spx": _spx_range_cache["day_low"],
+            "day_open_spx": _spx_range_cache["day_open"],
             "source": "Yahoo ^GSPC (cached)",
         }
 
@@ -90,14 +91,17 @@ def fetch_spx_day_range(spy_day_high: float = None, spy_day_low: float = None,
         info = ticker.fast_info
         day_high = info.get("dayHigh") or info.get("day_high")
         day_low = info.get("dayLow") or info.get("day_low")
+        day_open = info.get("open") or info.get("regularMarketOpen")
         if day_high and day_low and day_high > 0 and day_low > 0:
             _spx_range_cache["day_high"] = round(float(day_high), 2)
             _spx_range_cache["day_low"] = round(float(day_low), 2)
+            _spx_range_cache["day_open"] = round(float(day_open), 2) if day_open and day_open > 0 else None
             _spx_range_cache["fetched_at"] = now
-            logger.info(f"Fetched SPX day range from Yahoo: High={day_high:.2f}, Low={day_low:.2f}")
+            logger.info(f"Fetched SPX day range from Yahoo: High={day_high:.2f}, Low={day_low:.2f}, Open={day_open}")
             return {
                 "day_high_spx": _spx_range_cache["day_high"],
                 "day_low_spx": _spx_range_cache["day_low"],
+                "day_open_spx": _spx_range_cache["day_open"],
                 "source": "Yahoo ^GSPC (live)",
             }
         else:
@@ -113,6 +117,7 @@ def fetch_spx_day_range(spy_day_high: float = None, spy_day_low: float = None,
         return {
             "day_high_spx": fallback_high,
             "day_low_spx": fallback_low,
+            "day_open_spx": None,
             "source": "SPY ratio fallback",
         }
 
@@ -122,10 +127,11 @@ def fetch_spx_day_range(spy_day_high: float = None, spy_day_low: float = None,
         return {
             "day_high_spx": _spx_range_cache["day_high"],
             "day_low_spx": _spx_range_cache["day_low"],
+            "day_open_spx": _spx_range_cache["day_open"],
             "source": "Yahoo ^GSPC (stale cache)",
         }
 
-    return {"day_high_spx": None, "day_low_spx": None, "source": "unavailable"}
+    return {"day_high_spx": None, "day_low_spx": None, "day_open_spx": None, "source": "unavailable"}
 
 
 def fetch_vix_data() -> dict:
@@ -191,7 +197,8 @@ def fetch_vix_data() -> dict:
 
 
 def compute_expected_move(spx_price: float, vix: float, vix9d: float = None,
-                          hours_remaining: float = 6.5) -> dict:
+                          hours_remaining: float = 6.5,
+                          day_open_spx: float = None) -> dict:
     """
     Computes the expected SPX move for the remaining trading session.
 
@@ -200,6 +207,11 @@ def compute_expected_move(spx_price: float, vix: float, vix9d: float = None,
 
     VIX9D is preferred for 0DTE because it captures near-term vol more accurately.
     If VIX9D unavailable, use VIX with a 0.85 scaling factor (intraday vol < annualized).
+
+    Phase 16 (C1): Conditional remaining expected move.
+    If SPX has already moved significantly from open, the probability of an equally
+    large ADDITIONAL move is much lower. We compute the remaining expected move budget
+    by discounting the move already consumed.
     """
     # Use VIX9D if available, otherwise scale VIX down
     effective_vol = vix9d if vix9d else vix * 0.85
@@ -208,29 +220,63 @@ def compute_expected_move(spx_price: float, vix: float, vix9d: float = None,
     # ~252 trading days × 6.5h = 1638 hours/year
     TRADING_HOURS_PER_YEAR = 252 * 6.5  # 1638
 
+    # Full-day expected 1-sigma from open (for reference)
+    full_day_1sigma = spx_price * (effective_vol / 100) * math.sqrt(6.5 / TRADING_HOURS_PER_YEAR)
+
     # Expected 1-sigma move for remaining hours
     expected_1sigma = spx_price * (effective_vol / 100) * math.sqrt(hours_remaining / TRADING_HOURS_PER_YEAR)
 
+    # --- C1: Conditional remaining move after move consumed ---
+    move_consumed_pts = 0.0
+    move_consumed_pct = 0.0
+    conditional_1sigma = expected_1sigma  # default: no adjustment
+
+    if day_open_spx and day_open_spx > 0 and full_day_1sigma > 0:
+        move_consumed_pts = abs(spx_price - day_open_spx)
+        move_consumed_pct = round(move_consumed_pts / full_day_1sigma, 2) if full_day_1sigma > 0 else 0.0
+
+        # Only apply discount when move exceeds 0.3σ — small moves are noise
+        if move_consumed_pct > 0.30:
+            # Discount remaining sigma: the more move consumed, the less remaining expected
+            # Using linear decay: if 100% of 1σ consumed, remaining is ~70% of time-based σ
+            # If 200% consumed, remaining is ~50%. This reflects mean-reversion tendency.
+            discount = max(0.40, 1.0 - move_consumed_pct * 0.30)
+            conditional_1sigma = expected_1sigma * discount
+
     # Practical expected range (markets stay within 1σ ~68% of the time)
     expected_range = round(expected_1sigma, 1)
+    conditional_range = round(conditional_1sigma, 1)
     # 2-sigma move (95% probability) — this is the "don't sell closer than this"
     expected_2sigma = round(expected_1sigma * 2, 1)
     # Conservative moat: 1.5σ (85% probability) — our recommended minimum
-    recommended_moat = round(expected_1sigma * 1.5, 1)
+    # Use CONDITIONAL sigma for moat recommendation (the key change)
+    recommended_moat = round(conditional_1sigma * 1.5, 1)
+
+    # Build explanation
+    move_note = ""
+    if move_consumed_pts > 5 and day_open_spx:
+        direction = "up" if spx_price > day_open_spx else "down"
+        move_note = f" Already moved {move_consumed_pts:.0f} pts {direction} ({move_consumed_pct:.1f}σ consumed). Conditional 1σ: ±{conditional_range} pts."
 
     return {
         "vix": vix,
         "vix9d": vix9d,
         "effective_vol": round(effective_vol, 2),
         "expected_1sigma": expected_range,
+        "conditional_1sigma": conditional_range,
         "expected_2sigma": expected_2sigma,
         "recommended_moat": recommended_moat,
         "hours_remaining": round(hours_remaining, 2),
+        "move_consumed_pts": round(move_consumed_pts, 1),
+        "move_consumed_pct": move_consumed_pct,
+        "full_day_1sigma": round(full_day_1sigma, 1),
+        "day_open_spx": day_open_spx,
         "explanation": (
             f"VIX{'9D' if vix9d else ''} {effective_vol:.1f} → "
             f"1σ move: ±{expected_range} pts, "
             f"2σ: ±{expected_2sigma} pts. "
             f"Rec moat: {recommended_moat} pts (1.5σ)"
+            f"{move_note}"
         ),
     }
 

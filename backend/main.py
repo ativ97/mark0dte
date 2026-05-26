@@ -13,7 +13,7 @@ logger = logging.getLogger("0DTE-QuantEngine")
 
 # Import refactored modules
 from data_fetcher import fetch_alpaca_market_data, fetch_spx_live_price, fetch_spx_day_range, fetch_vix_data, compute_expected_move, fetch_gex_data, fetch_realized_move_distribution
-from engine import analyze_market_regime, evaluate_positions, generate_recommendations, compute_watch_levels, compute_position_summary, compute_smart_moat, analyze_trade_proposal, clear_rec_state, auto_propose_positions
+from engine import analyze_market_regime, evaluate_positions, generate_recommendations, compute_watch_levels, compute_position_summary, compute_smart_moat, analyze_trade_proposal, clear_rec_state, auto_propose_positions, generate_market_insights
 from database import Base, engine as db_engine, get_db, PositionDB, ClosedPositionDB
 from accuracy_tracker import log_recommendation, resolve_position, clear_position_state, get_accuracy_stats, get_signal_log
 
@@ -154,6 +154,8 @@ class SmartMoat(BaseModel):
     signal_quality: str
     range_exhausted: bool
     combined_factor: float
+    move_consumed_factor: float = 1.0
+    move_consumed_pct: float = 0.0
 
 
 class RegimeTransition(BaseModel):
@@ -195,9 +197,14 @@ class ExpectedMove(BaseModel):
     vix9d: float | None = None
     effective_vol: float | None = None
     expected_1sigma: float | None = None
+    conditional_1sigma: float | None = None
     expected_2sigma: float | None = None
     recommended_moat: float | None = None
     hours_remaining: float | None = None
+    move_consumed_pts: float = 0.0
+    move_consumed_pct: float = 0.0
+    full_day_1sigma: float | None = None
+    day_open_spx: float | None = None
     explanation: str = "VIX data unavailable"
 
 
@@ -216,6 +223,42 @@ class RealizedDistribution(BaseModel):
     mean_abs_move_pct: float | None = None
     median_abs_move_pct: float | None = None
     explanation: str = "Realized distribution unavailable"
+
+
+class InsightPositionCard(BaseModel):
+    id: int
+    light: str
+    type: str
+    strike: float
+    summary: str
+    verdict: str
+    action: str
+    moat: float
+    profit_pct: float = 0
+    reversal_score: int = 0
+    heat_score: int = 0
+    context: str = ""
+
+
+class InsightKeyLevel(BaseModel):
+    level: float
+    label: str
+    meaning: str
+
+
+class InsightActionItem(BaseModel):
+    priority: str
+    message: str
+
+
+class MarketInsights(BaseModel):
+    market_light: str = "GREEN"
+    market_headline: str = ""
+    market_story: str = ""
+    position_cards: list[InsightPositionCard] = []
+    key_levels: list[InsightKeyLevel] = []
+    action_items: list[InsightActionItem] = []
+    timestamp: str = ""
 
 
 class TelemetryResponse(BaseModel):
@@ -255,6 +298,7 @@ class TelemetryResponse(BaseModel):
     intraday_pl: IntradayPL | None = None
     trade_proposals: list | None = None
     accuracy_stats: dict | None = None
+    market_insights: MarketInsights | None = None
 
 
 # --- API ENDPOINTS ---
@@ -353,8 +397,9 @@ def get_telemetry(db: Session = Depends(get_db)):
     )
     day_high_spx = spx_range["day_high_spx"] or round(momentum_data["day_high_spy"] * spx_spy_ratio, 2)
     day_low_spx = spx_range["day_low_spx"] or round(momentum_data["day_low_spy"] * spx_spy_ratio, 2)
+    day_open_spx = spx_range.get("day_open_spx")
     range_position = momentum_data["range_position"]
-    logger.info(f"SPX Day Range: High={day_high_spx}, Low={day_low_spx} (source: {spx_range['source']})")
+    logger.info(f"SPX Day Range: High={day_high_spx}, Low={day_low_spx}, Open={day_open_spx} (source: {spx_range['source']})")
 
     # Phase 7: Fetch VIX data for expected move calculation
     vix_data = fetch_vix_data()
@@ -365,6 +410,7 @@ def get_telemetry(db: Session = Depends(get_db)):
         expected_move_data = compute_expected_move(
             spx_price, vix_data["vix"], vix_data.get("vix9d"),
             hours_remaining=hours_remaining,
+            day_open_spx=day_open_spx,
         )
         vix_based_moat = expected_move_data["recommended_moat"]
         logger.info(f"VIX Expected Move: {expected_move_data['explanation']}")
@@ -390,6 +436,8 @@ def get_telemetry(db: Session = Depends(get_db)):
         regime_data, spx_price, day_high_spx, day_low_spx, range_position,
         vix_based_moat=vix_based_moat,
         gex_data=gex_data,
+        expected_move_data=expected_move_data,
+        day_open_spx=day_open_spx,
     )
     smart_moat = smart_moat_data["smart_moat"]
     logger.info(f"Smart Moat: {smart_moat_data['moat_explanation']}")
@@ -408,6 +456,8 @@ def get_telemetry(db: Session = Depends(get_db)):
         momentum_label=momentum_data.get("momentum_label", ""),
         vwap_dev=regime_data.get("vwap_dev", 0.0),
         gex_data=gex_data,
+        rsi_14=round(df.iloc[-1]['RSI_14'], 2),
+        er_value=regime_data["er_value"],
     )
 
     # Log recommendations to accuracy tracker
@@ -471,6 +521,19 @@ def get_telemetry(db: Session = Depends(get_db)):
         gex_data=gex_data,
     )
 
+    # Phase 2: Generate plain-English market insights for the Insights tab
+    market_insights = generate_market_insights(
+        regime_data=regime_data,
+        evaluated_positions=evaluated_positions,
+        smart_moat_data=smart_moat_data,
+        expected_move_data=expected_move_data,
+        gex_data=gex_data,
+        spx_price=spx_price,
+        day_high_spx=day_high_spx,
+        day_low_spx=day_low_spx,
+        recommendations=recommendations,
+    )
+
     logger.info(f"Telemetry formulated. Tracking {len(evaluated_positions)} positions. {len(recommendations)} recommendations. Day P/L: ${intraday_pl['total_pl']}. {len(trade_proposals)} proposals.")
     return TelemetryResponse(
         symbol="SPY [Alpaca V2]",
@@ -509,6 +572,7 @@ def get_telemetry(db: Session = Depends(get_db)):
         intraday_pl=intraday_pl,
         trade_proposals=trade_proposals if trade_proposals else None,
         accuracy_stats=get_accuracy_stats(),
+        market_insights=market_insights,
     )
 
 
