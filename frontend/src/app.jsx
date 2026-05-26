@@ -314,6 +314,7 @@ export default function App() {
                         </div>
                         <div className={`text-sm font-medium mb-0.5 ${lightTextColors[card.light] || 'text-slate-400'}`}>{card.verdict}</div>
                         {card.context && <div className="text-[11px] text-slate-500 mb-1">{card.context}</div>}
+                        {card.gex_proximity && <div className="text-[11px] text-purple-400/80 mb-1" title="Nearest GEX wall relative to your strike. Protective walls act as price barriers in your favor.">{card.gex_proximity}</div>}
                         <div className="flex items-center justify-between">
                           <span className="text-sm text-cyan-400 font-medium">{card.action}</span>
                           <div className="flex items-center gap-2">
@@ -413,8 +414,34 @@ export default function App() {
             <span className="text-sm font-semibold text-slate-400 uppercase tracking-wider group-hover:text-slate-200">Key Evidence</span>
             <span className="text-slate-500 text-lg">{showEvidence ? '\u2212' : '+'}</span>
           </button>
-          {showEvidence && telemetry && (
+          {showEvidence && telemetry && (() => {
+            const prev = telemetry.previous_snapshot;
+            // Compute deltas for "What Changed" badges
+            const deltas = [];
+            if (prev) {
+              const erD = telemetry.er_value - prev.er_value;
+              if (Math.abs(erD) >= 0.05) deltas.push({ label: 'ER', val: erD > 0 ? `+${erD.toFixed(2)}` : erD.toFixed(2), color: erD > 0 ? 'text-blue-400' : 'text-red-400', arrow: erD > 0 ? '\u25B2' : '\u25BC' });
+              const rsiD = telemetry.rsi_14 - prev.rsi_14;
+              if (Math.abs(rsiD) >= 3) deltas.push({ label: 'RSI', val: rsiD > 0 ? `+${rsiD.toFixed(0)}` : rsiD.toFixed(0), color: rsiD > 0 ? 'text-amber-400' : 'text-cyan-400', arrow: rsiD > 0 ? '\u25B2' : '\u25BC' });
+              const gexD = (telemetry.gex_data?.net_gex || 0) - (prev.gex_net || 0);
+              if (Math.abs(gexD) >= 5e6) deltas.push({ label: 'GEX', val: `${gexD > 0 ? '+' : ''}${(gexD/1e6).toFixed(0)}M`, color: gexD > 0 ? 'text-emerald-400' : 'text-red-400', arrow: gexD > 0 ? '\u25B2' : '\u25BC' });
+              const spxD = telemetry.spx_price - prev.spx_price;
+              if (Math.abs(spxD) >= 2) deltas.push({ label: 'SPX', val: `${spxD > 0 ? '+' : ''}${spxD.toFixed(1)}`, color: spxD > 0 ? 'text-emerald-400' : 'text-red-400', arrow: spxD > 0 ? '\u25B2' : '\u25BC' });
+              const rpD = telemetry.range_position - prev.range_position;
+              if (Math.abs(rpD) >= 10) deltas.push({ label: 'Range', val: `${rpD > 0 ? '+' : ''}${rpD.toFixed(0)}%`, color: rpD > 0 ? 'text-amber-400' : 'text-cyan-400', arrow: rpD > 0 ? '\u25B2' : '\u25BC' });
+            }
+            return (
             <div className="bg-slate-800 border border-slate-700 rounded-lg p-5 shadow-xl">
+              {deltas.length > 0 && (
+                <div className="flex items-center gap-2 mb-3 flex-wrap">
+                  <span className="text-[10px] text-slate-600 font-semibold uppercase">Changed:</span>
+                  {deltas.map((d, i) => (
+                    <span key={i} className={`text-xs font-mono font-bold px-1.5 py-0.5 rounded bg-slate-900/80 ${d.color}`} title={`${d.label} changed ${d.val} since last refresh`}>
+                      {d.label} {d.arrow}{d.val}
+                    </span>
+                  ))}
+                </div>
+              )}
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 {/* ER — Trend Strength */}
                 {(() => {
@@ -425,16 +452,18 @@ export default function App() {
                   const erText = er >= 0.50 ? 'text-blue-400' : er >= 0.20 ? 'text-emerald-400' : er >= 0.10 ? 'text-amber-400' : 'text-red-400';
                   const erDanger = er >= 0.50 && telemetry.directional_bias?.includes('BULL') && telemetry.market_insights?.position_cards?.some(c => c.type?.includes('Call'));
                   const erDangerPut = er >= 0.50 && telemetry.directional_bias?.includes('BEAR') && telemetry.market_insights?.position_cards?.some(c => c.type?.includes('Put'));
+                  const erDelta = prev ? er - prev.er_value : null;
+                  const erArrow = erDelta != null && Math.abs(erDelta) >= 0.02 ? (erDelta > 0 ? ' \u25B2' : ' \u25BC') : '';
                   return (
                     <div className={`p-3 rounded border ${(erDanger || erDangerPut) ? 'border-red-700/60 bg-red-900/10 ring-1 ring-red-500/30' : 'border-slate-700/50 bg-slate-900/50'}`} title="Efficiency Ratio: 0=pure noise, 1=perfect trend. Direction of ER matters most — rising ER means a real move is forming.">
                       <div className="flex items-center justify-between mb-1">
                         <span className="text-[11px] text-slate-500 font-semibold uppercase">Trend Strength (ER)</span>
-                        <span className={`text-sm font-bold font-mono ${erText}`}>{er?.toFixed(2)}</span>
+                        <span className={`text-sm font-bold font-mono ${erText}`}>{er?.toFixed(2)}{erArrow && <span className={erDelta > 0 ? 'text-blue-400' : 'text-red-400'}>{erArrow}</span>}</span>
                       </div>
                       <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden mb-1">
                         <div className={`h-full rounded-full transition-all ${erColor}`} style={{ width: `${erPct}%` }}></div>
                       </div>
-                      <div className={`text-[10px] ${erText}`}>{erLabel}{(erDanger || erDangerPut) ? ' — pushing toward your strikes!' : ''}</div>
+                      <div className={`text-[10px] ${erText}`}>{erLabel}{(erDanger || erDangerPut) ? ' — pushing toward your strikes!' : ''}{erDelta != null && Math.abs(erDelta) >= 0.02 ? ` (was ${prev.er_value.toFixed(2)})` : ''}</div>
                     </div>
                   );
                 })()}
@@ -449,18 +478,20 @@ export default function App() {
                   const rsiColor = isOverbought || isOversold ? 'bg-amber-500' : 'bg-slate-400';
                   const rsiText = isOverbought ? 'text-amber-400' : isOversold ? 'text-amber-400' : 'text-slate-400';
                   const rsiBorder = (isOverbought || isOversold) ? 'border-amber-700/60 bg-amber-900/10 ring-1 ring-amber-500/30' : 'border-slate-700/50 bg-slate-900/50';
+                  const rsiDelta = prev ? rsi - prev.rsi_14 : null;
+                  const rsiArrow = rsiDelta != null && Math.abs(rsiDelta) >= 2 ? (rsiDelta > 0 ? ' \u25B2' : ' \u25BC') : '';
                   return (
                     <div className={`p-3 rounded border ${rsiBorder}`} title="RSI (14): Below 30=oversold (bounce likely), above 70=overbought (pullback likely). 40-60=neutral. The user's key insight on May 26 was recognizing RSI overbought → reversal.">
                       <div className="flex items-center justify-between mb-1">
                         <span className="text-[11px] text-slate-500 font-semibold uppercase">Momentum (RSI)</span>
-                        <span className={`text-sm font-bold font-mono ${rsiText}`}>{rsi?.toFixed(0)}</span>
+                        <span className={`text-sm font-bold font-mono ${rsiText}`}>{rsi?.toFixed(0)}{rsiArrow && <span className={rsiDelta > 0 ? 'text-amber-400' : 'text-cyan-400'}>{rsiArrow}</span>}</span>
                       </div>
                       <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden mb-1 relative">
                         <div className={`h-full rounded-full transition-all ${rsiColor}`} style={{ width: `${rsiPct}%` }}></div>
                         <div className="absolute top-0 bottom-0 left-[40%] w-px bg-slate-600"></div>
                         <div className="absolute top-0 bottom-0 left-[60%] w-px bg-slate-600"></div>
                       </div>
-                      <div className={`text-[10px] ${rsiText}`}>{rsiLabel}</div>
+                      <div className={`text-[10px] ${rsiText}`}>{rsiLabel}{rsiDelta != null && Math.abs(rsiDelta) >= 2 ? ` (was ${prev.rsi_14.toFixed(0)})` : ''}</div>
                     </div>
                   );
                 })()}
@@ -472,11 +503,13 @@ export default function App() {
                   const isPos = gex.gex_regime === 'POSITIVE';
                   const isNeg = gex.gex_regime === 'NEGATIVE';
                   const magStr = gex.net_gex ? (Math.abs(gex.net_gex) >= 1e6 ? `${(gex.net_gex/1e6).toFixed(0)}M` : `${(gex.net_gex/1e3).toFixed(0)}K`) : 'N/A';
+                  const gexDelta = prev && prev.gex_net ? (gex.net_gex || 0) - prev.gex_net : null;
+                  const gexArrow = gexDelta != null && Math.abs(gexDelta) >= 3e6 ? (gexDelta > 0 ? ' \u25B2' : ' \u25BC') : '';
                   return (
                     <div className={`p-3 rounded border ${isNeg ? 'border-red-700/60 bg-red-900/10 ring-1 ring-red-500/30' : 'border-slate-700/50 bg-slate-900/50'}`} title="Gamma Exposure: POSITIVE=dealers buy dips & sell rallies (mean-reverting, caps moves). NEGATIVE=dealers amplify moves (trending, dangerous).">
                       <div className="flex items-center justify-between mb-1">
                         <span className="text-[11px] text-slate-500 font-semibold uppercase">Dealers (GEX)</span>
-                        <span className={`text-sm font-bold font-mono ${isPos ? 'text-emerald-400' : isNeg ? 'text-red-400' : 'text-slate-400'}`}>{magStr}</span>
+                        <span className={`text-sm font-bold font-mono ${isPos ? 'text-emerald-400' : isNeg ? 'text-red-400' : 'text-slate-400'}`}>{magStr}{gexArrow && <span className={gexDelta > 0 ? 'text-emerald-400' : 'text-red-400'}>{gexArrow}</span>}</span>
                       </div>
                       <div className={`text-[10px] ${isPos ? 'text-emerald-400' : isNeg ? 'text-red-400' : 'text-slate-400'}`}>
                         {isPos ? 'Mean-reverting — dealers cap rallies & buy dips' : isNeg ? 'Amplifying — dealers make moves bigger!' : 'Neutral positioning'}
@@ -558,7 +591,8 @@ export default function App() {
                 })()}
               </div>
             </div>
-          )}
+            );
+          })()}
 
           {/* ===== RAW DASHBOARD (collapsible, collapsed by default) ===== */}
           <button

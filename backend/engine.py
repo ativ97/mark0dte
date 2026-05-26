@@ -2769,7 +2769,7 @@ def generate_market_insights(
             else:
                 light = "RED"
                 verdict = "Warning zone — monitor closely"
-        elif moat < pos.get("exit_strategy", {}).get("trigger_spx", moat + 999) and exit_action in ("CLOSE_SOON", "CLOSE_NOW"):
+        elif moat < (pos.get("exit_strategy", {}).get("trigger_spx") or moat + 999) and exit_action in ("CLOSE_SOON", "CLOSE_NOW"):
             light = "RED"
             verdict = f"System recommends closing"
         elif profit_pct >= 80:
@@ -2814,6 +2814,37 @@ def generate_market_insights(
             else:
                 context += f" That's within today's {day_range:.0f}-pt range — stay alert."
 
+        # GEX wall proximity for this position
+        gex_proximity = None
+        if gex_data and gex_data.get("gamma_wall_spx", 0) > 0:
+            gw = gex_data["gamma_wall_spx"]
+            pw = gex_data.get("put_wall_spx", 0)
+            cw = gex_data.get("call_wall_spx", 0)
+            strike = pos["strike"]
+            is_put = pos["type"] == "Put Spread"
+
+            # Find the most relevant wall for this position type
+            if is_put:
+                # Put spreads care about put wall (support) and gamma wall
+                relevant_wall = pw if pw > 0 else gw
+                wall_label = "Put Wall" if pw > 0 else "Gamma Wall"
+                wall_dist = round(strike - relevant_wall, 0) if relevant_wall else 0
+                if relevant_wall > 0:
+                    if relevant_wall >= strike:
+                        gex_proximity = f"{wall_label} {relevant_wall:.0f} is ABOVE your strike — protecting you"
+                    else:
+                        gex_proximity = f"{wall_label} {relevant_wall:.0f}: {abs(wall_dist):.0f} pts below your strike"
+            else:
+                # Call spreads care about call wall (resistance) and gamma wall
+                relevant_wall = cw if cw > 0 else gw
+                wall_label = "Call Wall" if cw > 0 else "Gamma Wall"
+                wall_dist = round(relevant_wall - strike, 0) if relevant_wall else 0
+                if relevant_wall > 0:
+                    if relevant_wall <= strike:
+                        gex_proximity = f"{wall_label} {relevant_wall:.0f} is BELOW your strike — protecting you"
+                    else:
+                        gex_proximity = f"{wall_label} {relevant_wall:.0f}: {abs(wall_dist):.0f} pts above your strike"
+
         position_cards.append({
             "id": pos["id"],
             "light": light,
@@ -2827,6 +2858,7 @@ def generate_market_insights(
             "reversal_score": reversal,
             "heat_score": _compute_heat_score(pos, regime_data, gex_data),
             "context": context,
+            "gex_proximity": gex_proximity,
         })
 
     # ---- KEY LEVELS ----

@@ -1,0 +1,73 @@
+2026-05-19 08:32:33,703 - __main__ - INFO - Starting 0DTE Quant Engine server...
+2026-05-19 08:32:48,018 - main - INFO - Received new request for /api/telemetry
+2026-05-19 08:32:48,018 - main - DEBUG - Fetching Alpaca data for SPY...
+2026-05-19 08:32:48,279 - main - DEBUG - Live price stitch successful. Latest tick: 734.315
+2026-05-19 08:32:48,280 - main - INFO - Successfully fetched and stitched 64 data points for SPY.
+2026-05-19 08:32:48,281 - main - DEBUG - Calculating TA indicators...
+2026-05-19 08:32:48,286 - main - DEBUG - Indicator calculation complete.
+2026-05-19 08:32:48,286 - main - DEBUG - Starting market regime analysis...
+2026-05-19 08:32:48,286 - main - DEBUG - Indicator values: CHOP=41.73, ER=0.34, RSI=34.04, EMA_9=735.47, EMA_21=735.66
+2026-05-19 08:32:48,286 - main - DEBUG - Calculated regime score: 1
+2026-05-19 08:32:48,286 - main - INFO - Final Regime: 'STATE A: TRENDING' with score 1.
+2026-05-19 08:32:48,286 - main - INFO - Request complete. Sending telemetry: STATE A: TRENDING
+2026-05-19 08:32:48,287 - main - DEBUG - Full response payload: {'symbol': 'SPY (SPX Proxy) [Alpaca V2]', 'current_price': 734.32, 'ema_9': 735.47, 'ema_21': 735.66, 'rsi_14': 34.04, 'chop_value': 41.73, 'er_value': 0.34, 'vwap_dev': 0.122, 'regime_state': 'STATE A: TRENDING', 'regime_score': 1, 'recommended_moat': '35-40 Points', 'stop_loss_rule': 'Strict 200% Premium Hit', 'timestamp': '2026-05-19 08:32:48 CDT'}
+2026-05-19 08:32:48,288 - main - INFO - Received new request for /api/telemetry
+2026-05-19 08:32:48,288 - main - DEBUG - Fetching Alpaca data for SPY...
+2026-05-19 08:32:48,590 - main - DEBUG - Live price stitch successful. Latest tick: 734.315
+2026-05-19 08:32:48,591 - main - INFO - Successfully fetched and stitched 64 data points for SPY.
+2026-05-19 08:32:48,592 - main - DEBUG - Calculating TA indicators...
+2026-05-19 08:32:48,596 - main - DEBUG - Indicator calculation complete.
+2026-05-19 08:32:48,596 - main - DEBUG - Starting market regime analysis...
+2026-05-19 08:32:48,596 - main - DEBUG - Indicator values: CHOP=41.73, ER=0.34, RSI=34.04, EMA_9=735.47, EMA_21=735.66
+2026-05-19 08:32:48,596 - main - DEBUG - Calculated regime score: 1
+2026-05-19 08:32:48,596 - main - INFO - Final Regime: 'STATE A: TRENDING' with score 1.
+2026-05-19 08:32:48,596 - main - INFO - Request complete. Sending telemetry: STATE A: TRENDING
+2026-05-19 08:32:48,596 - main - DEBUG - Full response payload: {'symbol': 'SPY (SPX Proxy) [Alpaca V2]', 'current_price': 734.32, 'ema_9': 735.47, 'ema_21': 735.66, 'rsi_14': 34.04, 'chop_value': 41.73, 'er_value': 0.34, 'vwap_dev': 0.122, 'regime_state': 'STATE A: TRENDING', 'regime_score': 1, 'recommended_moat': '35-40 Points', 'stop_loss_rule': 'Strict 200% Premium Hit', 'timestamp': '2026-05-19 08:32:48 CDT'}
+2026-05-19 08:32:56,548 - main - INFO - Received new request for /api/telemetry
+2026-05-19 08:32:56,548 - main - DEBUG - Fetching Alpaca data for SPY...
+2026-05-19 08:32:56,852 - main - DEBUG - Live price stitch successful. Latest tick: 734.265
+2026-05-19 08:32:56,853 - main - INFO - Successfully fetched and stitched 64 data points for SPY.
+2026-05-19 08:32:56,854 - main - DEBUG - Calculating TA indicators...
+2026-05-19 08:32:56,862 - main - DEBUG - Indicator calculation complete.
+2026-05-19 08:32:56,862 - main - DEBUG - Starting market regime analysis...
+2026-05-19 08:32:56,863 - main - DEBUG - Indicator values: CHOP=41.35, ER=0.35, RSI=33.70, EMA_9=735.46, EMA_21=735.66
+2026-05-19 08:32:56,863 - main - DEBUG - Calculated regime score: 1
+2026-05-19 08:32:56,863 - main - INFO - Final Regime: 'STATE A: TRENDING' with score 1.
+2026-05-19 08:32:56,863 - main - INFO - Request complete. Sending telemetry: STATE A: TRENDING
+2026-05-19 08:32:56,863 - main - DEBUG - Full response payload: {'symbol': 'SPY (SPX Proxy) [Alpaca V2]', 'current_price': 734.26, 'ema_9': 735.46, 'ema_21': 735.66, 'rsi_14': 33.7, 'chop_value': 41.35, 'er_value': 0.35, 'vwap_dev': 0.129, 'regime_state': 'STATE A: TRENDING', 'regime_score': 1, 'recommended_moat': '35-40 Points', 'stop_loss_rule': 'Strict 200% Premium Hit', 'timestamp': '2026-05-19 08:32:56 CDT'}
+2026-05-19 08:32:56,865 - main - INFO - Received new request for /api/telemetry
+2026-05-19 08:32:56,865 - main - DEBUG - Fetching Alpaca data for SPY...
+2026-05-19 08:32:57,146 - main - DEBUG - Live price stitch successful. Latest tick: 734.265
+2026-05-19 08:32:57,146 - main - INFO - Successfully fetched and stitched 64 data points for SPY.
+2026-05-19 08:32:57,148 - main - DEBUG - Calculating TA indicators...
+2026-05-19 08:32:57,154 - main - DEBUG - Indicator calculation complete.
+2026-05-19 08:32:57,154 - main - DEBUG - Starting market regime analysis...
+2026-05-19 08:32:57,154 - main - DEBUG - Indicator values: CHOP=41.35, ER=0.35, RSI=33.70, EMA_9=735.46, EMA_21=735.66
+2026-05-19 08:32:57,154 - main - DEBUG - Calculated regime score: 1
+2026-05-19 08:32:57,154 - main - INFO - Final Regime: 'STATE A: TRENDING' with score 1.
+2026-05-19 08:32:57,154 - main - INFO - Request complete. Sending telemetry: STATE A: TRENDING
+2026-05-19 08:32:57,154 - main - DEBUG - Full response payload: {'symbol': 'SPY (SPX Proxy) [Alpaca V2]', 'current_price': 734.26, 'ema_9': 735.46, 'ema_21': 735.66, 'rsi_14': 33.7, 'chop_value': 41.35, 'er_value': 0.35, 'vwap_dev': 0.129, 'regime_state': 'STATE A: TRENDING', 'regime_score': 1, 'recommended_moat': '35-40 Points', 'stop_loss_rule': 'Strict 200% Premium Hit', 'timestamp': '2026-05-19 08:32:57 CDT'}
+2026-05-19 08:33:18,723 - main - INFO - Received new request for /api/telemetry
+2026-05-19 08:33:18,723 - main - DEBUG - Fetching Alpaca data for SPY...
+2026-05-19 08:33:19,003 - main - DEBUG - Live price stitch successful. Latest tick: 734.895
+2026-05-19 08:33:19,004 - main - INFO - Successfully fetched and stitched 64 data points for SPY.
+2026-05-19 08:33:19,005 - main - DEBUG - Calculating TA indicators...
+2026-05-19 08:33:19,012 - main - DEBUG - Indicator calculation complete.
+2026-05-19 08:33:19,012 - main - DEBUG - Starting market regime analysis...
+2026-05-19 08:33:19,012 - main - DEBUG - Indicator values: CHOP=45.21, ER=0.21, RSI=38.60, EMA_9=735.59, EMA_21=735.72
+2026-05-19 08:33:19,012 - main - DEBUG - Calculated regime score: 1
+2026-05-19 08:33:19,012 - main - INFO - Final Regime: 'STATE A: TRENDING' with score 1.
+2026-05-19 08:33:19,012 - main - INFO - Request complete. Sending telemetry: STATE A: TRENDING
+2026-05-19 08:33:19,012 - main - DEBUG - Full response payload: {'symbol': 'SPY (SPX Proxy) [Alpaca V2]', 'current_price': 734.89, 'ema_9': 735.59, 'ema_21': 735.72, 'rsi_14': 38.6, 'chop_value': 45.21, 'er_value': 0.21, 'vwap_dev': 0.043, 'regime_state': 'STATE A: TRENDING', 'regime_score': 1, 'recommended_moat': '35-40 Points', 'stop_loss_rule': 'Strict 200% Premium Hit', 'timestamp': '2026-05-19 08:33:19 CDT'}
+2026-05-19 08:33:56,550 - main - INFO - Received new request for /api/telemetry
+2026-05-19 08:33:56,550 - main - DEBUG - Fetching Alpaca data for SPY...
+2026-05-19 08:33:56,828 - main - DEBUG - Live price stitch successful. Latest tick: 734.8
+2026-05-19 08:33:56,828 - main - INFO - Successfully fetched and stitched 64 data points for SPY.
+2026-05-19 08:33:56,829 - main - DEBUG - Calculating TA indicators...
+2026-05-19 08:33:56,834 - main - DEBUG - Indicator calculation complete.
+2026-05-19 08:33:56,834 - main - DEBUG - Starting market regime analysis...
+2026-05-19 08:33:56,834 - main - DEBUG - Indicator values: CHOP=45.21, ER=0.24, RSI=37.77, EMA_9=735.57, EMA_21=735.71
+2026-05-19 08:33:56,834 - main - DEBUG - Calculated regime score: 1
+2026-05-19 08:33:56,834 - main - INFO - Final Regime: 'STATE A: TRENDING' with score 1.
+2026-05-19 08:33:56,834 - main - INFO - Request complete. Sending telemetry: STATE A: TRENDING
+2026-05-19 08:33:56,834 - main - DEBUG - Full response payload: {'symbol': 'SPY (SPX Proxy) [Alpaca V2]', 'current_price': 734.8, 'ema_9': 735.57, 'ema_21': 735.71, 'rsi_14': 37.77, 'chop_value': 45.21, 'er_value': 0.24, 'vwap_dev': 0.056, 'regime_state': 'STATE A: TRENDING', 'regime_score': 1, 'recommended_moat': '35-40 Points', 'stop_loss_rule': 'Strict 200% Premium Hit', 'timestamp': '2026-05-19 08:33:56 CDT'}

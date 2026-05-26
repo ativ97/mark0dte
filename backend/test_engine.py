@@ -258,6 +258,56 @@ class TestMomentumLabelFix(unittest.TestCase):
         self.assertIn("DRIFT", result["momentum_label"])
 
 
+class TestImportSmokeTest(unittest.TestCase):
+    """Verify all backend modules import cleanly — catches syntax errors and bad references."""
+
+    def test_engine_imports(self):
+        import engine
+        for fn in ['analyze_market_regime', 'evaluate_positions', 'generate_recommendations',
+                    'compute_smart_moat', 'generate_market_insights', 'auto_propose_positions']:
+            self.assertTrue(hasattr(engine, fn), f"engine.{fn} missing")
+
+    def test_main_imports(self):
+        import main
+        self.assertTrue(hasattr(main, 'app'))
+
+    def test_data_fetcher_imports(self):
+        import data_fetcher
+        for fn in ['fetch_alpaca_market_data', 'compute_expected_move', 'fetch_gex_data']:
+            self.assertTrue(hasattr(data_fetcher, fn), f"data_fetcher.{fn} missing")
+
+
+class TestGenerateMarketInsightsEdgeCases(unittest.TestCase):
+    """Regression tests for generate_market_insights edge cases."""
+
+    def test_trigger_spx_none_does_not_crash(self):
+        """trigger_spx=None in exit_strategy must not cause TypeError."""
+        from engine import generate_market_insights
+        regime_data = {
+            "regime_state": "STATE C HIGH ENTROPY / WHIPSAW",
+            "regime_score": 4,
+            "er_value": 0.04,
+            "directional_bias": "NEUTRAL",
+            "time_pressure": {"hours_remaining": 2.0, "time_pressure_level": "LOW"},
+            "momentum": {"momentum_label": "RANGEBOUND"},
+            "rsi_14": 50.0,
+        }
+        pos = {
+            "id": 1, "type": "Call Spread", "strike": 7555.0, "credit": 0.60,
+            "moat": 36.0, "moat_pct": 50.0,
+            "exit_strategy": {"action": "CLOSE_SOON", "trigger_spx": None, "escalation_level": 1},
+            "estimated_buyback": 0.30, "reversal_score": 0,
+        }
+        # Should not raise TypeError
+        result = generate_market_insights(
+            regime_data=regime_data,
+            evaluated_positions=[pos],
+            smart_moat_data={"smart_moat": 30, "moat_explanation": "test"},
+        )
+        self.assertIn("position_cards", result)
+        self.assertEqual(len(result["position_cards"]), 1)
+
+
 if __name__ == '__main__':
     print("\n--- RUNNING QUANT ENGINE UNIT TESTS ---\n")
     unittest.main(verbosity=2)

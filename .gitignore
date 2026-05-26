@@ -7,7 +7,7 @@ __pycache__/
 *.pyo
 
 # SQLite databases
-*.db
+
 
 # Logs
 backend/logs/

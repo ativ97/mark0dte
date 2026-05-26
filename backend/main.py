@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from pydantic import BaseModel, field_validator
 from typing import Literal, Optional
+from collections import deque
 import datetime
 import logging
 import pandas_ta  # Registers the .ta accessor on DataFrames
@@ -19,6 +20,9 @@ from accuracy_tracker import log_recommendation, resolve_position, clear_positio
 
 # Initialize Database tables
 Base.metadata.create_all(bind=db_engine)
+
+# --- TELEMETRY RING BUFFER (in-memory, stores last 5 snapshots for trend deltas) ---
+_telemetry_snapshots: deque = deque(maxlen=5)
 
 app = FastAPI(title="0DTE Quant Engine V3.0")
 
@@ -238,6 +242,7 @@ class InsightPositionCard(BaseModel):
     reversal_score: int = 0
     heat_score: int = 0
     context: str = ""
+    gex_proximity: str | None = None
 
 
 class InsightKeyLevel(BaseModel):
@@ -299,6 +304,7 @@ class TelemetryResponse(BaseModel):
     trade_proposals: list | None = None
     accuracy_stats: dict | None = None
     market_insights: MarketInsights | None = None
+    previous_snapshot: dict | None = None
 
 
 # --- API ENDPOINTS ---
@@ -534,6 +540,29 @@ def get_telemetry(db: Session = Depends(get_db)):
         recommendations=recommendations,
     )
 
+    # --- RING BUFFER: Capture snapshot and compute deltas ---
+    current_rsi = round(df.iloc[-1]['RSI_14'], 2)
+    current_er = regime_data["er_value"]
+    current_gex_net = gex_data.get("net_gex", 0) if gex_data else 0
+    current_gex_regime = gex_data.get("gex_regime", "UNAVAILABLE") if gex_data else "UNAVAILABLE"
+
+    current_snapshot = {
+        "er_value": current_er,
+        "rsi_14": current_rsi,
+        "range_position": range_position,
+        "spx_price": round(spx_price, 2),
+        "regime_state": regime_data["regime_state"],
+        "directional_bias": regime_data["directional_bias"],
+        "gex_net": current_gex_net,
+        "gex_regime": current_gex_regime,
+        "effective_moat_min": smart_moat,
+        "vwap_dev": regime_data["vwap_dev"],
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
+    }
+
+    prev_snapshot = _telemetry_snapshots[-1] if _telemetry_snapshots else None
+    _telemetry_snapshots.append(current_snapshot)
+
     logger.info(f"Telemetry formulated. Tracking {len(evaluated_positions)} positions. {len(recommendations)} recommendations. Day P/L: ${intraday_pl['total_pl']}. {len(trade_proposals)} proposals.")
     return TelemetryResponse(
         symbol="SPY [Alpaca V2]",
@@ -545,9 +574,9 @@ def get_telemetry(db: Session = Depends(get_db)):
         range_position=range_position,
         ema_9=round(df.iloc[-1]['EMA_9'], 2),
         ema_21=round(df.iloc[-1]['EMA_21'], 2),
-        rsi_14=round(df.iloc[-1]['RSI_14'], 2),
+        rsi_14=current_rsi,
         chop_value=regime_data["chop_value"],
-        er_value=regime_data["er_value"],
+        er_value=current_er,
         vwap_dev=regime_data["vwap_dev"],
         regime_state=regime_data["regime_state"],
         regime_score=regime_data["regime_score"],
@@ -573,6 +602,7 @@ def get_telemetry(db: Session = Depends(get_db)):
         trade_proposals=trade_proposals if trade_proposals else None,
         accuracy_stats=get_accuracy_stats(),
         market_insights=market_insights,
+        previous_snapshot=prev_snapshot,
     )
 
 

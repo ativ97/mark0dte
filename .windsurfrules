@@ -1,7 +1,7 @@
 # 0DTE Quant Engine — AI Agent Rules & Notes
 # This file is automatically loaded by Windsurf at the start of every session.
 # Keep it updated with hard-won knowledge, gotchas, and conventions.
-# Last updated: 2026-05-27 (Phase 3 UI overhaul complete)
+# Last updated: 2026-05-27 (Phase 4 trend deltas + GEX proximity)
 
 ## MANDATORY AGENT RULES
 
@@ -14,6 +14,7 @@
    - Update test count in this file if tests are added/removed.
 4. **NEVER SILENTLY SWALLOW ERRORS**: If you encounter a new API quirk, data format issue, or environment problem, log it in KNOWN PITFALLS below with the fix.
 5. **VERIFY BEFORE CODING**: Before editing `engine.py`, `data_fetcher.py`, or `main.py`, re-read the KEY DATA FLOW and relevant function signatures below. Do not assume parameter lists from memory.
+6. **RUN TESTS AFTER EVERY CHANGE**: After editing any backend file, run `pytest test_engine.py -v --tb=short` and confirm all tests pass before considering the change done. The import smoke tests catch syntax errors and missing attributes. Never ship code that hasn't been tested.
 
 ## ENVIRONMENT
 
@@ -23,7 +24,7 @@
 - **Run tests**: `/Users/ativ.aggarwal/miniconda3/envs/mark/bin/python -m pytest test_engine.py -v --tb=short`
 - **Start backend**: `/Users/ativ.aggarwal/miniconda3/envs/mark/bin/python -m uvicorn main:app --reload` from `backend/`
 - **Start frontend**: `npm run dev` from `frontend/`
-- **Test count**: 18 tests as of Phase 16 (3 original + 15 Phase 16). All must pass before any PR.
+- **Test count**: 22 tests as of Phase 4 UI (3 original + 15 Phase 16 + 3 import smoke + 1 regression). All must pass before any PR.
 
 ## PROJECT STRUCTURE
 
@@ -98,6 +99,7 @@ GET /api/telemetry →
 9. **Frontend is a single file**: `app.jsx` is the entire React app (~2000+ lines). No component decomposition yet.
 10. **Range position can be 0-100**: 0% = at day low, 100% = at day high, 50% = midpoint. Used extensively in moat/risk calculations.
 11. **Config imports are explicit**: engine.py uses `from config import ...` with named imports. If you reference a new config constant, you MUST add it to the import list. `SAFE_ZONE_THRESHOLD` (25) = `WARNING_ZONE_THRESHOLD` (25) — same value, different semantic intent.
+12. **`.get(key, default)` does NOT protect against explicit None**: If a dict has `{"trigger_spx": None}`, `.get("trigger_spx", fallback)` returns `None`, NOT the fallback. Always use `d.get(key) or fallback` when the value can be explicitly None.
 
 ## ALGORITHM VERSION HISTORY (Key milestones)
 
@@ -143,13 +145,19 @@ combined = range × signal × time × exhaustion × event × gex × move_consume
 - **Raw dashboard grouping (C)**: Section headers ("Price & Trend", "Risk, Regime & Directives") within the raw dashboard for visual organization.
 - **3-layer architecture**: Layer 1 = Narrative (story + positions + key levels), Layer 2 = Evidence (curated indicators), Layer 3 = Raw Dashboard (full data). Progressive disclosure from conclusions → reasoning → raw data.
 
-## WHAT'S NEXT (Phase 4 — Backend State + Trends)
+## PHASE 4 — COMPLETED (Trend Deltas + GEX Proximity)
 
-- Backend telemetry snapshot ring buffer (store last 5-10 snapshots in memory)
-- ER Trend Arrow (#29): "0.31 ▼▼ (was 0.60)" with color coding
-- GEX Magnitude Trend (#36): "71M ▲ (was 17M)" with color coding
-- "What Changed" delta panel: 3-4 badges showing biggest changes since last refresh
-- GEX Wall Proximity in Position Cards (#26): "Gamma Wall 7518: 37 pts below your 7555 strike"
+- **Ring buffer** (`_telemetry_snapshots` deque, maxlen=5): Stores key indicator values per refresh. Exposed as `previous_snapshot` in TelemetryResponse.
+- **Trend arrows (#29, #36)**: ER, RSI, GEX cards in Evidence layer show ▲/▼ arrows + "(was X)" when delta exceeds threshold. Thresholds: ER ±0.02, RSI ±2, GEX ±3M.
+- **"What Changed" badges**: Row above Evidence grid showing biggest deltas since last refresh (ER, RSI, GEX, SPX, Range). Thresholds: ER ±0.05, RSI ±3, GEX ±5M, SPX ±2, Range ±10%.
+- **GEX Wall Proximity (#26)**: Per-position `gex_proximity` field in InsightPositionCard. Shows "Put Wall 7480: 20 pts below your strike" or "Gamma Wall is ABOVE your strike — protecting you". Displayed as purple text on narrative position cards.
+- **Files**: main.py (ring buffer, `previous_snapshot` field, `gex_proximity` schema), engine.py (gex_proximity computation in `generate_market_insights`), app.jsx (deltas, arrows, badges, gex_proximity display).
+
+## WHAT'S NEXT (Phase 5 — Polish + Advanced)
+
 - RSI Reversal Warning Badge (#35): "Overbought — reversal likely" on RSI card + story
 - Explain Mode toggle (inline tooltips on technical terms)
+- Premium History / Velocity (#28): sparkline or last-5-values
+- "What if" scenarios: premium estimation at hypothetical SPX prices
+- EOD review generator: "Today you learned..."
 - See trading_log_2026-05-26.md for full phased plan
