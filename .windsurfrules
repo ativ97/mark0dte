@@ -26,7 +26,7 @@
 - **Run tests**: `/Users/ativ.aggarwal/miniconda3/envs/mark/bin/python -m pytest test_engine.py test_positions.py -v --tb=short`. Also `python synthetic_replay.py` — P0-2 regime-gate validation; GR-0513 + GR-0529 must PASS.
 - **Start backend**: `/Users/ativ.aggarwal/miniconda3/envs/mark/bin/python -m uvicorn main:app --reload` from `backend/`
 - **Start frontend**: `npm run dev` from `frontend/`
-- **Test count**: 80 tests as of 2026-05-29 — **54 in `test_engine.py`** (49 + 2 sizing + EST-quarantine + resolve-expired + ask-side pricing) + **26 in `test_positions.py`**. Run BOTH files. Plus `synthetic_replay.py` (P0-2 regime-gate validation: GR-0513 + GR-0529 must PASS). All must pass before any PR.
+- **Test count**: 81 tests as of 2026-05-29 — **55 in `test_engine.py`** (49 + 2 sizing + EST-quarantine + resolve-expired + ask-side pricing + warn-tier) + **26 in `test_positions.py`**. Run BOTH files. Plus `synthetic_replay.py` (P0-2 regime gate: GR-0513/0518/0519 force-exit + GR-0529 hold must all PASS). All must pass before any PR.
 
 ## PROJECT STRUCTURE
 

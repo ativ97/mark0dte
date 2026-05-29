@@ -1574,6 +1574,11 @@ export default function App() {
                             ) : (
                               <span className="text-[10px] font-bold text-slate-500 bg-slate-700/50 px-1.5 py-0.5 rounded">EST</span>
                             )}
+                            {pos.trend_continuation ? (
+                              <span className="text-[10px] font-bold text-amber-400 bg-amber-400/10 px-1.5 py-0.5 rounded" title="P0-2: trend-continuation regime (negative GEX / surge) — a with-trend short is force-exited, not held.">TREND-CONT</span>
+                            ) : pos.mean_reverting ? (
+                              <span className="text-[10px] font-bold text-cyan-400 bg-cyan-400/10 px-1.5 py-0.5 rounded" title="P0-2: mean-reverting regime (positive GEX) — holding the bounce is allowed; exits are not forced.">MEAN-REV</span>
+                            ) : null}
                             {pos.buyback_trend && pos.buyback_trend !== 'NEW' && pos.buyback_samples >= 3 && (
                               <span className={`text-[10px] font-mono px-1 py-0.5 rounded ${
                                 pos.buyback_trend === 'FALLING' ? 'text-emerald-400 bg-emerald-400/10' :
