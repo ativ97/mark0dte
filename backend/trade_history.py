@@ -299,7 +299,8 @@ def compute_trade_stats(spreads: list[dict]) -> dict:
 
     gross_wins = sum(s["net_pl"] for s in spreads if s["net_pl"] > 0)
     gross_losses = abs(sum(s["net_pl"] for s in spreads if s["net_pl"] < 0))
-    profit_factor = round(gross_wins / gross_losses, 2) if gross_losses > 0 else float('inf')
+    # Guard: a no-loss state would make this float('inf') → invalid JSON. Cap at a finite sentinel.
+    profit_factor = round(gross_wins / gross_losses, 2) if gross_losses > 0 else (999.99 if gross_wins > 0 else 0.0)
 
     avg_credit = round(sum(abs(s["open_credit"]) for s in spreads) / total, 2)
     avg_width = round(sum(s["width"] for s in spreads) / total, 1)

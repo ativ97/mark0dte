@@ -7,9 +7,9 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [showStory, setShowStory] = useState(true);
   const [showEvidence, setShowEvidence] = useState(true);
-  const [showRaw, setShowRaw] = useState(false);
+  const [showRaw, setShowRaw] = useState(true);
 
-  const [newPosition, setNewPosition] = useState({ type: 'Put Spread', strike: '', credit: '' });
+  const [newPosition, setNewPosition] = useState({ type: 'Put Spread', strike: '', credit: '', contracts: '1' });
   const [tradeAnalysis, setTradeAnalysis] = useState(null);
   const [analyzingTrade, setAnalyzingTrade] = useState(false);
 
@@ -88,10 +88,11 @@ export default function App() {
         body: JSON.stringify({
           type: newPosition.type,
           strike: parseFloat(newPosition.strike),
-          credit: parseFloat(newPosition.credit)
+          credit: parseFloat(newPosition.credit),
+          contracts: parseInt(newPosition.contracts) || 1
         })
       });
-      setNewPosition({ type: 'Put Spread', strike: '', credit: '' });
+      setNewPosition({ type: 'Put Spread', strike: '', credit: '', contracts: '1' });
       fetchTelemetry(); // Instantly refresh UI state
     } catch (err) {
       console.error("Failed to save position to database", err);
@@ -280,6 +281,11 @@ export default function App() {
                     <h2 className={`text-xl font-bold ${lightTextColors[insights.market_light] || 'text-slate-300'}`}>{insights.market_headline}</h2>
                     <div className="ml-auto flex items-center gap-3">
                       <span className="text-sm text-slate-500" title="S&P 500 index price \u2014 all strikes and moats are measured against this">SPX <span className="text-emerald-400 font-bold">{telemetry.spx_price?.toFixed(2)}</span></span>
+                      {telemetry.ib_data && Math.abs(telemetry.ib_data.gap_pct) >= 0.3 && (
+                        <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${telemetry.ib_data.gap_pct > 0 ? 'bg-emerald-900/40 text-emerald-400' : 'bg-red-900/40 text-red-400'}`} title={`Opening gap from previous close. Large gaps (>0.8%) may indicate trend days.`}>
+                          Gap: {telemetry.ib_data.gap_pct > 0 ? '+' : ''}{telemetry.ib_data.gap_pct.toFixed(1)}%
+                        </span>
+                      )}
                       {gexRegime && gexRegime !== 'UNAVAILABLE' && (
                         <span className={`text-xs font-mono px-1.5 py-0.5 rounded ${gexRegime === 'POSITIVE' ? 'bg-emerald-900/40 text-emerald-400' : gexRegime === 'NEGATIVE' ? 'bg-red-900/40 text-red-400' : 'bg-slate-700 text-slate-400'}`} title={gexTooltip}>
                           GEX {netGexStr}
@@ -300,6 +306,97 @@ export default function App() {
                   )}
                 </div>
 
+                {/* Surge Alert Banner */}
+                {telemetry.surge_data && telemetry.surge_data.surge_type !== 'NONE' && (
+                  <div className={`rounded-lg p-3 border ${telemetry.surge_data.surge_type === 'TREND_SURGE' ? 'bg-red-900/40 border-red-500/60' : 'bg-amber-900/30 border-amber-500/50'}`}>
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className={`text-sm font-bold ${telemetry.surge_data.surge_type === 'TREND_SURGE' ? 'text-red-400' : 'text-amber-400'}`}>
+                        {telemetry.surge_data.surge_type === 'TREND_SURGE' ? '\u26A0 TREND SURGE' : '\u26A1 VOLATILE SURGE'}
+                      </span>
+                      <span className={`text-xs font-mono px-1.5 py-0.5 rounded ${telemetry.surge_data.surge_direction === 'BULLISH' ? 'bg-emerald-900/40 text-emerald-400' : 'bg-red-900/40 text-red-400'}`}>
+                        {telemetry.surge_data.surge_direction} {telemetry.surge_data.surge_pct > 0 ? '+' : ''}{telemetry.surge_data.surge_pct.toFixed(1)}%
+                      </span>
+                    </div>
+                    <p className="text-sm text-slate-300 mb-2">{telemetry.surge_data.message}</p>
+                    {telemetry.surge_data.surge_type === 'TREND_SURGE' && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] text-slate-500">Surge protection:</span>
+                        <div className="flex-1 h-1.5 bg-slate-700 rounded-full overflow-hidden">
+                          <div className="h-full bg-red-500 rounded-full transition-all" style={{width: `${(telemetry.surge_data.fade_multiplier * 100)}%`}}></div>
+                        </div>
+                        <span className="text-[10px] text-slate-500">{Math.round(telemetry.surge_data.fade_multiplier * 100)}%</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Gap Rejection Banner */}
+                {telemetry.gap_rejection && telemetry.gap_rejection.rejected && (
+                  <div className="rounded-lg p-3 border bg-purple-900/30 border-purple-500/50">
+                    <span className="text-sm font-bold text-purple-400">GAP REJECTED</span>
+                    <p className="text-sm text-purple-300 mt-1">{telemetry.gap_rejection.message}</p>
+                  </div>
+                )}
+
+                {/* Post-Event Shift Banner */}
+                {telemetry.post_event_shift && (
+                  <div className={`rounded-lg p-3 border ${
+                    telemetry.post_event_shift.shift_type === 'EVENT_BREAKOUT' ? 'bg-red-900/40 border-red-500/60' :
+                    telemetry.post_event_shift.shift_type === 'EVENT_ABSORBED' ? 'bg-emerald-900/30 border-emerald-500/50' :
+                    'bg-amber-900/30 border-amber-500/50'
+                  }`}>
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className={`text-sm font-bold ${
+                        telemetry.post_event_shift.shift_type === 'EVENT_BREAKOUT' ? 'text-red-400' :
+                        telemetry.post_event_shift.shift_type === 'EVENT_ABSORBED' ? 'text-emerald-400' :
+                        'text-amber-400'
+                      }`}>
+                        {telemetry.post_event_shift.shift_type === 'EVENT_BREAKOUT' ? '\u26A0' : telemetry.post_event_shift.shift_type === 'EVENT_ABSORBED' ? '\u2714' : '\u23F1'} {telemetry.post_event_shift.shift_type.replace('_', ' ')}
+                      </span>
+                      <span className="text-xs text-slate-400 font-mono">{telemetry.post_event_shift.minutes_since}min post-event</span>
+                      {telemetry.post_event_shift.spx_move_pts !== 0 && (
+                        <span className={`text-xs font-bold ${telemetry.post_event_shift.spx_move_pts > 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                          SPX {telemetry.post_event_shift.spx_move_pts > 0 ? '+' : ''}{telemetry.post_event_shift.spx_move_pts} pts
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-sm text-slate-300">{telemetry.post_event_shift.message}</p>
+                  </div>
+                )}
+
+                {/* P0-3 Position Sizing Banner — informational (amber), never hard-block (Ativ 2026-05-29) */}
+                {telemetry.positions?.some(p => p.position_risk && p.position_risk.warn_limit) && (() => {
+                  const worst = telemetry.positions
+                    .filter(p => p.position_risk)
+                    .reduce((a, b) => (b.position_risk.pct_of_account > (a?.position_risk?.pct_of_account ?? -1) ? b : a), null);
+                  const pr = worst?.position_risk;
+                  if (!pr) return null;
+                  return (
+                    <div className="rounded-lg p-3 border bg-amber-900/30 border-amber-500/50 text-amber-300">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-bold text-amber-400">{'⚠'} Position size: {pr.pct_of_account}% of account</span>
+                        <span className="text-xs text-slate-400 ml-auto">{worst.contracts} lots</span>
+                      </div>
+                      <p className="text-sm mt-1">
+                        Max loss ${pr.max_loss?.toLocaleString()} ({pr.pct_of_account}% of account). Informational — size as you see fit.
+                      </p>
+                    </div>
+                  );
+                })()}
+
+                {/* Portfolio Heat Banner */}
+                {telemetry.portfolio_heat && telemetry.portfolio_heat.level !== 'SAFE' && (
+                  <div className={`rounded-lg p-3 border ${telemetry.portfolio_heat.level === 'DANGER' ? 'bg-red-900/30 border-red-500/50 text-red-300' : 'bg-amber-900/30 border-amber-500/50 text-amber-300'}`}>
+                    <div className="flex items-center gap-2">
+                      <span className={`text-sm font-bold ${telemetry.portfolio_heat.level === 'DANGER' ? 'text-red-400' : 'text-amber-400'}`}>
+                        {telemetry.portfolio_heat.level === 'DANGER' ? '\u26A0' : '\u26A0'} Portfolio Heat: {telemetry.portfolio_heat.level}
+                      </span>
+                      <span className="text-xs text-slate-400 ml-auto">{telemetry.portfolio_heat.call_count}C / {telemetry.portfolio_heat.put_count}P</span>
+                    </div>
+                    <p className="text-sm mt-1">{telemetry.portfolio_heat.warning}</p>
+                  </div>
+                )}
+
                 {/* Position Cards */}
                 {insights.position_cards?.length > 0 && (
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -318,7 +415,8 @@ export default function App() {
                         <div className="flex items-center justify-between">
                           <span className="text-sm text-cyan-400 font-medium">{card.action}</span>
                           <div className="flex items-center gap-2">
-                            {card.profit_pct > 0 && <span className="text-xs text-emerald-400 cursor-help" title={`Estimated ${card.profit_pct}% of max profit captured. Based on premium decay model (approximate).`}>~{card.profit_pct}%</span>}
+                            {card.profit_pct > 0 && <span className="text-xs text-emerald-400 cursor-help" title={`${card.pricing_source === 'LIVE' || card.pricing_source === 'SPXW' ? 'Live' : 'Estimated'} ${card.profit_pct}% of max profit captured.`}>{card.pricing_source === 'LIVE' || card.pricing_source === 'SPXW' ? '' : '~'}{card.profit_pct}%</span>}
+                            {(card.pricing_source === 'LIVE' || card.pricing_source === 'SPXW') && <span className={`text-[9px] font-bold px-1 py-0.5 rounded ${card.pricing_source === 'SPXW' ? 'text-cyan-400 bg-cyan-400/10' : 'text-emerald-400 bg-emerald-400/10'}`}>{card.pricing_source === 'SPXW' ? 'SPXW' : 'LIVE'}</span>}
                             {card.reversal_score > 0 && <span className="text-xs text-purple-400 cursor-help" title={`Reversal Score ${card.reversal_score}/100: Probability that price will reverse away from your strike. Based on RSI extremes, ER weakness, GEX walls, and range position. Above 50 = algo may hold instead of exit.`}>Rev: {card.reversal_score}</span>}
                             <button onClick={() => closePosition(card.id)} title="Close position (archive with P/L)" className="text-emerald-500 hover:text-emerald-400 font-bold px-1 py-0.5 text-xs rounded hover:bg-emerald-900/30 leading-none">Close</button>
                             <button onClick={() => deletePosition(card.id)} title="Delete (mistake)" className="text-red-500/60 hover:text-red-400 px-1 py-0.5 text-xs rounded hover:bg-red-900/30 leading-none">Del</button>
@@ -329,89 +427,16 @@ export default function App() {
                   </div>
                 )}
 
-                {/* Quick Add Position — link to raw dashboard form */}
-                <button
-                  onClick={() => setShowRaw(true)}
-                  className="w-full text-left px-4 py-2.5 rounded border border-dashed border-slate-600 hover:border-emerald-500/50 hover:bg-emerald-900/10 text-slate-500 hover:text-emerald-400 text-sm transition-colors"
-                >
-                  + Add Position / Analyze Trade <span className="text-slate-600 text-xs">(opens Raw Dashboard)</span>
-                </button>
-
-                {/* Key Levels — vertical price ladder, high to low */}
-                {insights.key_levels?.length > 0 && (() => {
-                  const spx = telemetry.spx_price || 0;
-                  const deduped = [];
-                  const seen = {};
-                  insights.key_levels.forEach(lvl => {
-                    const key = lvl.level.toFixed(0);
-                    if (seen[key]) {
-                      seen[key].label += ' / ' + lvl.label;
-                      if (lvl.meaning.length > seen[key].meaning.length) seen[key].meaning = lvl.meaning;
-                    } else {
-                      seen[key] = { ...lvl };
-                      deduped.push(seen[key]);
-                    }
-                  });
-                  const sorted = deduped.sort((a, b) => b.level - a.level);
-                  const rows = [];
-                  let spxInserted = false;
-                  sorted.forEach((level, i) => {
-                    if (!spxInserted && spx >= level.level) {
-                      rows.push({ type: 'spx', level: spx });
-                      spxInserted = true;
-                    }
-                    rows.push({ type: 'level', ...level, idx: i });
-                  });
-                  if (!spxInserted) rows.push({ type: 'spx', level: spx });
-
-                  const typeStyle = (label) => {
-                    if (label.includes('Strike')) return { border: 'border-cyan-500', text: 'text-cyan-400', bg: 'bg-cyan-500/5' };
-                    if (label.includes('Gamma')) return { border: 'border-purple-500', text: 'text-purple-400', bg: 'bg-purple-500/5' };
-                    if (label.includes('Put Wall')) return { border: 'border-emerald-500', text: 'text-emerald-400', bg: 'bg-emerald-500/5' };
-                    if (label.includes('Call Wall')) return { border: 'border-red-500', text: 'text-red-400', bg: 'bg-red-500/5' };
-                    if (label.includes('High')) return { border: 'border-amber-500', text: 'text-amber-400', bg: 'bg-amber-500/5' };
-                    if (label.includes('Low')) return { border: 'border-amber-500', text: 'text-amber-400', bg: 'bg-amber-500/5' };
-                    return { border: 'border-slate-600', text: 'text-slate-400', bg: '' };
-                  };
-
-                  return (
-                    <div className="bg-slate-800 border border-slate-700 rounded-lg p-4 shadow-xl">
-                      <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3" title="SPX price levels sorted high to low. Your current price is marked.">Key Levels</h3>
-                      <div className="space-y-0">
-                        {rows.map((row, i) => {
-                          if (row.type === 'spx') {
-                            return (
-                              <div key="spx" className="flex items-center gap-2 py-1.5 my-1 bg-emerald-900/30 border border-emerald-500/40 rounded px-3">
-                                <span className="font-mono font-bold text-emerald-400 w-16 text-sm">{row.level.toFixed(0)}</span>
-                                <span className="text-emerald-400 font-semibold text-xs uppercase tracking-wider">SPX Now</span>
-                                <span className="ml-auto text-emerald-500 text-[10px] animate-pulse">LIVE</span>
-                              </div>
-                            );
-                          }
-                          const s = typeStyle(row.label);
-                          const dist = Math.abs(spx - row.level);
-                          return (
-                            <div key={row.idx} className={`flex items-center gap-2 py-1 px-3 border-l-2 ${s.border} ${s.bg} cursor-help`} title={row.meaning}>
-                              <span className={`font-mono font-bold w-16 text-sm ${s.text}`}>{row.level.toFixed(0)}</span>
-                              <span className="text-slate-400 text-xs flex-1">{row.label}</span>
-                              <span className="text-slate-500 text-[11px] font-mono">{dist.toFixed(0)}pts</span>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  );
-                })()}
               </div>
             );
           })()}
 
-          {/* ===== LAYER 2: KEY EVIDENCE (collapsible, open by default) ===== */}
+          {/* ===== LAYER 2: KEY EVIDENCE & LEVELS (collapsible, open by default) ===== */}
           <button
             onClick={() => setShowEvidence(prev => !prev)}
             className="w-full flex items-center justify-between bg-slate-800/70 hover:bg-slate-800 border border-slate-700 rounded-lg px-5 py-3 transition-colors group"
           >
-            <span className="text-sm font-semibold text-slate-400 uppercase tracking-wider group-hover:text-slate-200">Key Evidence</span>
+            <span className="text-sm font-semibold text-slate-400 uppercase tracking-wider group-hover:text-slate-200">Key Evidence &amp; Levels</span>
             <span className="text-slate-500 text-lg">{showEvidence ? '\u2212' : '+'}</span>
           </button>
           {showEvidence && telemetry && (() => {
@@ -430,10 +455,51 @@ export default function App() {
               const rpD = telemetry.range_position - prev.range_position;
               if (Math.abs(rpD) >= 10) deltas.push({ label: 'Range', val: `${rpD > 0 ? '+' : ''}${rpD.toFixed(0)}%`, color: rpD > 0 ? 'text-amber-400' : 'text-cyan-400', arrow: rpD > 0 ? '\u25B2' : '\u25BC' });
             }
+            // Build key levels data (moved from narrative)
+            const insights = telemetry.market_insights || {};
+            const spx = telemetry.spx_price || 0;
+            const gexLevels = telemetry.gex_data?.top_levels || [];
+            const gexByStrike = {};
+            gexLevels.forEach(lvl => { gexByStrike[lvl.strike_spx] = lvl; });
+            const maxGex = Math.max(...gexLevels.map(l => Math.abs(l.gex)), 1);
+            const keyLevelRows = [];
+            if (insights.key_levels?.length > 0) {
+              const deduped = [];
+              const seen = {};
+              insights.key_levels.forEach(lvl => {
+                const key = lvl.level.toFixed(0);
+                if (seen[key]) {
+                  seen[key].label += ' / ' + lvl.label;
+                  if (lvl.meaning.length > seen[key].meaning.length) seen[key].meaning = lvl.meaning;
+                } else {
+                  seen[key] = { ...lvl };
+                  deduped.push(seen[key]);
+                }
+              });
+              const sorted = deduped.sort((a, b) => b.level - a.level);
+              let spxInserted = false;
+              sorted.forEach((level, i) => {
+                if (!spxInserted && spx >= level.level) {
+                  keyLevelRows.push({ type: 'spx', level: spx });
+                  spxInserted = true;
+                }
+                keyLevelRows.push({ type: 'level', ...level, idx: i });
+              });
+              if (!spxInserted) keyLevelRows.push({ type: 'spx', level: spx });
+            }
+            const typeStyle = (label) => {
+              if (label.includes('Strike')) return { border: 'border-cyan-500', text: 'text-cyan-400', bg: 'bg-cyan-500/5' };
+              if (label.includes('Gamma')) return { border: 'border-purple-500', text: 'text-purple-400', bg: 'bg-purple-500/5' };
+              if (label.includes('Put Wall')) return { border: 'border-emerald-500', text: 'text-emerald-400', bg: 'bg-emerald-500/5' };
+              if (label.includes('Call Wall')) return { border: 'border-red-500', text: 'text-red-400', bg: 'bg-red-500/5' };
+              if (label.includes('High')) return { border: 'border-amber-500', text: 'text-amber-400', bg: 'bg-amber-500/5' };
+              if (label.includes('Low')) return { border: 'border-amber-500', text: 'text-amber-400', bg: 'bg-amber-500/5' };
+              return { border: 'border-slate-600', text: 'text-slate-400', bg: '' };
+            };
             return (
-            <div className="bg-slate-800 border border-slate-700 rounded-lg p-5 shadow-xl">
+            <div className="space-y-3">
               {deltas.length > 0 && (
-                <div className="flex items-center gap-2 mb-3 flex-wrap">
+                <div className="flex items-center gap-2 flex-wrap px-1">
                   <span className="text-[10px] text-slate-600 font-semibold uppercase">Changed:</span>
                   {deltas.map((d, i) => (
                     <span key={i} className={`text-xs font-mono font-bold px-1.5 py-0.5 rounded bg-slate-900/80 ${d.color}`} title={`${d.label} changed ${d.val} since last refresh`}>
@@ -442,159 +508,241 @@ export default function App() {
                   ))}
                 </div>
               )}
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                {/* ER — Trend Strength */}
-                {(() => {
-                  const er = telemetry.er_value;
-                  const erPct = Math.min(100, (er || 0) * 100);
-                  const erLabel = er >= 0.50 ? 'Strong trend' : er >= 0.20 ? 'Weak signal' : er >= 0.10 ? 'Noise' : 'Dead';
-                  const erColor = er >= 0.50 ? 'bg-blue-500' : er >= 0.20 ? 'bg-emerald-500' : er >= 0.10 ? 'bg-amber-500' : 'bg-red-500';
-                  const erText = er >= 0.50 ? 'text-blue-400' : er >= 0.20 ? 'text-emerald-400' : er >= 0.10 ? 'text-amber-400' : 'text-red-400';
-                  const erDanger = er >= 0.50 && telemetry.directional_bias?.includes('BULL') && telemetry.market_insights?.position_cards?.some(c => c.type?.includes('Call'));
-                  const erDangerPut = er >= 0.50 && telemetry.directional_bias?.includes('BEAR') && telemetry.market_insights?.position_cards?.some(c => c.type?.includes('Put'));
-                  const erDelta = prev ? er - prev.er_value : null;
-                  const erArrow = erDelta != null && Math.abs(erDelta) >= 0.02 ? (erDelta > 0 ? ' \u25B2' : ' \u25BC') : '';
-                  return (
-                    <div className={`p-3 rounded border ${(erDanger || erDangerPut) ? 'border-red-700/60 bg-red-900/10 ring-1 ring-red-500/30' : 'border-slate-700/50 bg-slate-900/50'}`} title="Efficiency Ratio: 0=pure noise, 1=perfect trend. Direction of ER matters most — rising ER means a real move is forming.">
-                      <div className="flex items-center justify-between mb-1">
-                        <span className="text-[11px] text-slate-500 font-semibold uppercase">Trend Strength (ER)</span>
-                        <span className={`text-sm font-bold font-mono ${erText}`}>{er?.toFixed(2)}{erArrow && <span className={erDelta > 0 ? 'text-blue-400' : 'text-red-400'}>{erArrow}</span>}</span>
-                      </div>
-                      <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden mb-1">
-                        <div className={`h-full rounded-full transition-all ${erColor}`} style={{ width: `${erPct}%` }}></div>
-                      </div>
-                      <div className={`text-[10px] ${erText}`}>{erLabel}{(erDanger || erDangerPut) ? ' — pushing toward your strikes!' : ''}{erDelta != null && Math.abs(erDelta) >= 0.02 ? ` (was ${prev.er_value.toFixed(2)})` : ''}</div>
-                    </div>
-                  );
-                })()}
-
-                {/* RSI — Momentum */}
-                {(() => {
-                  const rsi = telemetry.rsi_14;
-                  const rsiPct = rsi || 50;
-                  const isOverbought = rsi > 60;
-                  const isOversold = rsi < 40;
-                  const rsiLabel = rsi > 70 ? 'Overbought — reversal likely' : rsi > 60 ? 'Bullish — approaching overbought' : rsi < 30 ? 'Oversold — bounce likely' : rsi < 40 ? 'Bearish — approaching oversold' : 'Neutral';
-                  const rsiColor = isOverbought || isOversold ? 'bg-amber-500' : 'bg-slate-400';
-                  const rsiText = isOverbought ? 'text-amber-400' : isOversold ? 'text-amber-400' : 'text-slate-400';
-                  const rsiBorder = (isOverbought || isOversold) ? 'border-amber-700/60 bg-amber-900/10 ring-1 ring-amber-500/30' : 'border-slate-700/50 bg-slate-900/50';
-                  const rsiDelta = prev ? rsi - prev.rsi_14 : null;
-                  const rsiArrow = rsiDelta != null && Math.abs(rsiDelta) >= 2 ? (rsiDelta > 0 ? ' \u25B2' : ' \u25BC') : '';
-                  return (
-                    <div className={`p-3 rounded border ${rsiBorder}`} title="RSI (14): Below 30=oversold (bounce likely), above 70=overbought (pullback likely). 40-60=neutral. The user's key insight on May 26 was recognizing RSI overbought → reversal.">
-                      <div className="flex items-center justify-between mb-1">
-                        <span className="text-[11px] text-slate-500 font-semibold uppercase">Momentum (RSI)</span>
-                        <span className={`text-sm font-bold font-mono ${rsiText}`}>{rsi?.toFixed(0)}{rsiArrow && <span className={rsiDelta > 0 ? 'text-amber-400' : 'text-cyan-400'}>{rsiArrow}</span>}</span>
-                      </div>
-                      <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden mb-1 relative">
-                        <div className={`h-full rounded-full transition-all ${rsiColor}`} style={{ width: `${rsiPct}%` }}></div>
-                        <div className="absolute top-0 bottom-0 left-[40%] w-px bg-slate-600"></div>
-                        <div className="absolute top-0 bottom-0 left-[60%] w-px bg-slate-600"></div>
-                      </div>
-                      <div className={`text-[10px] ${rsiText}`}>{rsiLabel}{rsiDelta != null && Math.abs(rsiDelta) >= 2 ? ` (was ${prev.rsi_14.toFixed(0)})` : ''}</div>
-                    </div>
-                  );
-                })()}
-
-                {/* GEX — Dealer Positioning */}
-                {(() => {
-                  const gex = telemetry.gex_data;
-                  if (!gex || gex.gex_regime === 'UNAVAILABLE') return null;
-                  const isPos = gex.gex_regime === 'POSITIVE';
-                  const isNeg = gex.gex_regime === 'NEGATIVE';
-                  const magStr = gex.net_gex ? (Math.abs(gex.net_gex) >= 1e6 ? `${(gex.net_gex/1e6).toFixed(0)}M` : `${(gex.net_gex/1e3).toFixed(0)}K`) : 'N/A';
-                  const gexDelta = prev && prev.gex_net ? (gex.net_gex || 0) - prev.gex_net : null;
-                  const gexArrow = gexDelta != null && Math.abs(gexDelta) >= 3e6 ? (gexDelta > 0 ? ' \u25B2' : ' \u25BC') : '';
-                  return (
-                    <div className={`p-3 rounded border ${isNeg ? 'border-red-700/60 bg-red-900/10 ring-1 ring-red-500/30' : 'border-slate-700/50 bg-slate-900/50'}`} title="Gamma Exposure: POSITIVE=dealers buy dips & sell rallies (mean-reverting, caps moves). NEGATIVE=dealers amplify moves (trending, dangerous).">
-                      <div className="flex items-center justify-between mb-1">
-                        <span className="text-[11px] text-slate-500 font-semibold uppercase">Dealers (GEX)</span>
-                        <span className={`text-sm font-bold font-mono ${isPos ? 'text-emerald-400' : isNeg ? 'text-red-400' : 'text-slate-400'}`}>{magStr}{gexArrow && <span className={gexDelta > 0 ? 'text-emerald-400' : 'text-red-400'}>{gexArrow}</span>}</span>
-                      </div>
-                      <div className={`text-[10px] ${isPos ? 'text-emerald-400' : isNeg ? 'text-red-400' : 'text-slate-400'}`}>
-                        {isPos ? 'Mean-reverting — dealers cap rallies & buy dips' : isNeg ? 'Amplifying — dealers make moves bigger!' : 'Neutral positioning'}
-                      </div>
-                      {gex.gamma_wall_spx > 0 && (
-                        <div className="text-[10px] text-slate-500 mt-0.5">Gamma Wall: {gex.gamma_wall_spx} ({Math.abs((telemetry.spx_price || 0) - gex.gamma_wall_spx).toFixed(0)} pts {(telemetry.spx_price || 0) > gex.gamma_wall_spx ? 'below' : 'above'})</div>
-                      )}
-                    </div>
-                  );
-                })()}
-
-                {/* Range Position */}
-                {(() => {
-                  const rp = telemetry.range_position;
-                  const dayH = telemetry.day_high_spx;
-                  const dayL = telemetry.day_low_spx;
-                  const rpLabel = rp >= 90 ? 'At day high — upside exhausted?' : rp <= 10 ? 'At day low — downside exhausted?' : rp >= 70 ? 'Near high' : rp <= 30 ? 'Near low' : 'Mid-range';
-                  const rpColor = (rp >= 85 || rp <= 15) ? 'text-amber-400' : 'text-slate-400';
-                  const rpBorder = (rp >= 85 || rp <= 15) ? 'border-amber-700/60 bg-amber-900/10 ring-1 ring-amber-500/30' : 'border-slate-700/50 bg-slate-900/50';
-                  return (
-                    <div className={`p-3 rounded border ${rpBorder}`} title="Where SPX sits within today's range. 0%=day low, 100%=day high. Extremes (>85% or <15%) suggest the current direction may be exhausted.">
-                      <div className="flex items-center justify-between mb-1">
-                        <span className="text-[11px] text-slate-500 font-semibold uppercase">Day Range</span>
-                        <span className={`text-sm font-bold font-mono ${rpColor}`}>{rp?.toFixed(0)}%</span>
-                      </div>
-                      <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden mb-1 relative">
-                        <div className="h-full rounded-full transition-all bg-slate-400" style={{ width: `${rp || 0}%` }}></div>
-                      </div>
-                      <div className="flex justify-between text-[9px] text-slate-600">
-                        <span>{dayL?.toFixed(0)}</span>
-                        <span className={`${rpColor} text-[10px]`}>{rpLabel}</span>
-                        <span>{dayH?.toFixed(0)}</span>
-                      </div>
-                    </div>
-                  );
-                })()}
-
-                {/* Smart Moat */}
-                {(() => {
-                  const moat = telemetry.effective_moat_min;
-                  const positions = telemetry.market_insights?.position_cards || [];
-                  const closestMoat = positions.length > 0 ? Math.min(...positions.map(p => p.moat || 999)) : null;
-                  const safe = closestMoat == null || closestMoat >= moat;
-                  return (
-                    <div className={`p-3 rounded border ${!safe ? 'border-amber-700/60 bg-amber-900/10 ring-1 ring-amber-500/30' : 'border-slate-700/50 bg-slate-900/50'}`} title="Smart Moat = minimum safe distance (pts) between SPX and your strike. If any position is closer than this, it's in the warning zone.">
-                      <div className="flex items-center justify-between mb-1">
-                        <span className="text-[11px] text-slate-500 font-semibold uppercase">Smart Moat</span>
-                        <span className="text-sm font-bold font-mono text-slate-200">{moat} pts</span>
-                      </div>
-                      {closestMoat != null ? (
-                        <div className={`text-[10px] ${safe ? 'text-emerald-400' : 'text-amber-400'}`}>
-                          {safe ? `Closest position: ${closestMoat?.toFixed(0)} pts away ✓` : `⚠ Closest position: ${closestMoat?.toFixed(0)} pts — below ${moat} pt minimum!`}
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+                {/* LEFT: Evidence Cards (2/3 width) */}
+                <div className="lg:col-span-2 bg-slate-800 border border-slate-700 rounded-lg p-4 shadow-xl">
+                  <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">Evidence</h3>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                    {/* ER — Trend Strength */}
+                    {(() => {
+                      const er = telemetry.er_value;
+                      const erPct = Math.min(100, (er || 0) * 100);
+                      const erLabel = er >= 0.50 ? 'Strong trend' : er >= 0.20 ? 'Weak signal' : er >= 0.10 ? 'Noise' : 'Dead';
+                      const erColor = er >= 0.50 ? 'bg-blue-500' : er >= 0.20 ? 'bg-emerald-500' : er >= 0.10 ? 'bg-amber-500' : 'bg-red-500';
+                      const erText = er >= 0.50 ? 'text-blue-400' : er >= 0.20 ? 'text-emerald-400' : er >= 0.10 ? 'text-amber-400' : 'text-red-400';
+                      const erDanger = er >= 0.50 && telemetry.directional_bias?.includes('BULL') && telemetry.market_insights?.position_cards?.some(c => c.type?.includes('Call'));
+                      const erDangerPut = er >= 0.50 && telemetry.directional_bias?.includes('BEAR') && telemetry.market_insights?.position_cards?.some(c => c.type?.includes('Put'));
+                      const erDelta = prev ? er - prev.er_value : null;
+                      const erArrow = erDelta != null && Math.abs(erDelta) >= 0.02 ? (erDelta > 0 ? ' \u25B2' : ' \u25BC') : '';
+                      return (
+                        <div className={`p-3 rounded border ${(erDanger || erDangerPut) ? 'border-red-700/60 bg-red-900/10 ring-1 ring-red-500/30' : 'border-slate-700/50 bg-slate-900/50'}`} title="Efficiency Ratio: 0=pure noise, 1=perfect trend. Direction of ER matters most — rising ER means a real move is forming.">
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-[11px] text-slate-500 font-semibold uppercase">Trend Strength (ER)</span>
+                            <span className={`text-sm font-bold font-mono ${erText}`}>{er?.toFixed(2)}{erArrow && <span className={erDelta > 0 ? 'text-blue-400' : 'text-red-400'}>{erArrow}</span>}</span>
+                          </div>
+                          <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden mb-1">
+                            <div className={`h-full rounded-full transition-all ${erColor}`} style={{ width: `${erPct}%` }}></div>
+                          </div>
+                          <div className={`text-[10px] ${erText}`}>{erLabel}{(erDanger || erDangerPut) ? ' — pushing toward your strikes!' : ''}{erDelta != null && Math.abs(erDelta) >= 0.02 ? ` (was ${prev.er_value.toFixed(2)})` : ''}</div>
                         </div>
-                      ) : (
-                        <div className="text-[10px] text-slate-500">No open positions</div>
-                      )}
-                    </div>
-                  );
-                })()}
+                      );
+                    })()}
 
-                {/* VIX / Expected Move */}
-                {telemetry.expected_move && (() => {
-                  const em = telemetry.expected_move;
-                  const vixLevel = em.vix > 25 ? 'Fear' : em.vix > 18 ? 'Elevated' : 'Calm';
-                  const vixColor = em.vix > 25 ? 'text-red-400' : em.vix > 18 ? 'text-amber-400' : 'text-emerald-400';
-                  const vixBorder = em.vix > 25 ? 'border-red-700/60 bg-red-900/10 ring-1 ring-red-500/30' : 'border-slate-700/50 bg-slate-900/50';
-                  return (
-                    <div className={`p-3 rounded border ${vixBorder}`} title="VIX measures implied volatility. Higher VIX = wider expected moves = riskier for credit spreads. 1σ = 68% probability SPX stays within range.">
-                      <div className="flex items-center justify-between mb-1">
-                        <span className="text-[11px] text-slate-500 font-semibold uppercase">Volatility (VIX)</span>
-                        <span className={`text-sm font-bold font-mono ${vixColor}`}>{em.vix?.toFixed(1)}</span>
-                      </div>
-                      <div className={`text-[10px] ${vixColor}`}>{vixLevel} — 1σ move: ±{em.expected_1sigma} pts</div>
-                      {em.move_consumed_pct != null && em.move_consumed_pct > 0.3 && (
-                        <div className="text-[10px] text-slate-500 mt-0.5">{(em.move_consumed_pct * 100).toFixed(0)}% of expected move already consumed</div>
-                      )}
+                    {/* RSI — Momentum */}
+                    {(() => {
+                      const rsi = telemetry.rsi_14;
+                      const rsiPct = rsi || 50;
+                      const isOverbought = rsi > 60;
+                      const isOversold = rsi < 40;
+                      const rsiLabel = rsi > 70 ? 'Overbought — reversal likely' : rsi > 60 ? 'Bullish — approaching overbought' : rsi < 30 ? 'Oversold — bounce likely' : rsi < 40 ? 'Bearish — approaching oversold' : 'Neutral';
+                      const rsiColor = isOverbought || isOversold ? 'bg-amber-500' : 'bg-slate-400';
+                      const rsiText = isOverbought ? 'text-amber-400' : isOversold ? 'text-amber-400' : 'text-slate-400';
+                      const rsiBorder = (isOverbought || isOversold) ? 'border-amber-700/60 bg-amber-900/10 ring-1 ring-amber-500/30' : 'border-slate-700/50 bg-slate-900/50';
+                      const rsiDelta = prev ? rsi - prev.rsi_14 : null;
+                      const rsiArrow = rsiDelta != null && Math.abs(rsiDelta) >= 2 ? (rsiDelta > 0 ? ' \u25B2' : ' \u25BC') : '';
+                      return (
+                        <div className={`p-3 rounded border ${rsiBorder}`} title="RSI (14): Below 30=oversold (bounce likely), above 70=overbought (pullback likely). 40-60=neutral. The user's key insight on May 26 was recognizing RSI overbought → reversal.">
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-[11px] text-slate-500 font-semibold uppercase">Momentum (RSI)</span>
+                            <span className={`text-sm font-bold font-mono ${rsiText}`}>{rsi?.toFixed(0)}{rsiArrow && <span className={rsiDelta > 0 ? 'text-amber-400' : 'text-cyan-400'}>{rsiArrow}</span>}</span>
+                          </div>
+                          <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden mb-1 relative">
+                            <div className={`h-full rounded-full transition-all ${rsiColor}`} style={{ width: `${rsiPct}%` }}></div>
+                            <div className="absolute top-0 bottom-0 left-[40%] w-px bg-slate-600"></div>
+                            <div className="absolute top-0 bottom-0 left-[60%] w-px bg-slate-600"></div>
+                          </div>
+                          <div className={`text-[10px] ${rsiText}`}>{rsiLabel}{rsiDelta != null && Math.abs(rsiDelta) >= 2 ? ` (was ${prev.rsi_14.toFixed(0)})` : ''}</div>
+                        </div>
+                      );
+                    })()}
+
+                    {/* GEX — Dealer Positioning */}
+                    {(() => {
+                      const gex = telemetry.gex_data;
+                      if (!gex || gex.gex_regime === 'UNAVAILABLE') return null;
+                      const isPos = gex.gex_regime === 'POSITIVE';
+                      const isNeg = gex.gex_regime === 'NEGATIVE';
+                      const magStr = gex.net_gex ? (Math.abs(gex.net_gex) >= 1e6 ? `${(gex.net_gex/1e6).toFixed(0)}M` : `${(gex.net_gex/1e3).toFixed(0)}K`) : 'N/A';
+                      const gexDelta = prev && prev.gex_net ? (gex.net_gex || 0) - prev.gex_net : null;
+                      const gexArrow = gexDelta != null && Math.abs(gexDelta) >= 3e6 ? (gexDelta > 0 ? ' \u25B2' : ' \u25BC') : '';
+                      return (
+                        <div className={`p-3 rounded border ${isNeg ? 'border-red-700/60 bg-red-900/10 ring-1 ring-red-500/30' : 'border-slate-700/50 bg-slate-900/50'}`} title="Gamma Exposure: POSITIVE=dealers buy dips & sell rallies (mean-reverting, caps moves). NEGATIVE=dealers amplify moves (trending, dangerous).">
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-[11px] text-slate-500 font-semibold uppercase">Dealers (GEX)</span>
+                            <span className={`text-sm font-bold font-mono ${isPos ? 'text-emerald-400' : isNeg ? 'text-red-400' : 'text-slate-400'}`}>{magStr}{gexArrow && <span className={gexDelta > 0 ? 'text-emerald-400' : 'text-red-400'}>{gexArrow}</span>}</span>
+                          </div>
+                          <div className={`text-[10px] ${isPos ? 'text-emerald-400' : isNeg ? 'text-red-400' : 'text-slate-400'}`}>
+                            {isPos ? 'Mean-reverting — dealers cap rallies & buy dips' : isNeg ? 'Amplifying — dealers make moves bigger!' : 'Neutral positioning'}
+                          </div>
+                          {gex.gamma_wall_spx > 0 && (
+                            <div className="text-[10px] text-slate-500 mt-0.5">Gamma Wall: {gex.gamma_wall_spx} ({Math.abs((telemetry.spx_price || 0) - gex.gamma_wall_spx).toFixed(0)} pts {(telemetry.spx_price || 0) > gex.gamma_wall_spx ? 'below' : 'above'})</div>
+                          )}
+                        </div>
+                      );
+                    })()}
+
+                    {/* Range Position */}
+                    {(() => {
+                      const rp = telemetry.range_position;
+                      const dayH = telemetry.day_high_spx;
+                      const dayL = telemetry.day_low_spx;
+                      const rpLabel = rp >= 90 ? 'At day high — upside exhausted?' : rp <= 10 ? 'At day low — downside exhausted?' : rp >= 70 ? 'Near high' : rp <= 30 ? 'Near low' : 'Mid-range';
+                      const rpColor = (rp >= 85 || rp <= 15) ? 'text-amber-400' : 'text-slate-400';
+                      const rpBorder = (rp >= 85 || rp <= 15) ? 'border-amber-700/60 bg-amber-900/10 ring-1 ring-amber-500/30' : 'border-slate-700/50 bg-slate-900/50';
+                      return (
+                        <div className={`p-3 rounded border ${rpBorder}`} title="Where SPX sits within today's range. 0%=day low, 100%=day high. Extremes (>85% or <15%) suggest the current direction may be exhausted.">
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-[11px] text-slate-500 font-semibold uppercase">Day Range</span>
+                            <span className={`text-sm font-bold font-mono ${rpColor}`}>{rp?.toFixed(0)}%</span>
+                          </div>
+                          <div className="h-1.5 bg-slate-700 rounded-full overflow-hidden mb-1 relative">
+                            <div className="h-full rounded-full transition-all bg-slate-400" style={{ width: `${rp || 0}%` }}></div>
+                          </div>
+                          <div className="flex justify-between text-[9px] text-slate-600">
+                            <span>{dayL?.toFixed(0)}</span>
+                            <span className={`${rpColor} text-[10px]`}>{rpLabel}</span>
+                            <span>{dayH?.toFixed(0)}</span>
+                          </div>
+                        </div>
+                      );
+                    })()}
+
+                    {/* Smart Moat */}
+                    {(() => {
+                      const moat = telemetry.effective_moat_min;
+                      const positions = telemetry.market_insights?.position_cards || [];
+                      const closestMoat = positions.length > 0 ? Math.min(...positions.map(p => p.moat ?? 999)) : null;
+                      const safe = closestMoat == null || closestMoat >= moat;
+                      return (
+                        <div className={`p-3 rounded border ${!safe ? 'border-amber-700/60 bg-amber-900/10 ring-1 ring-amber-500/30' : 'border-slate-700/50 bg-slate-900/50'}`} title="Smart Moat = minimum safe distance (pts) between SPX and your strike. If any position is closer than this, it's in the warning zone.">
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-[11px] text-slate-500 font-semibold uppercase">Smart Moat</span>
+                            <span className="text-sm font-bold font-mono text-slate-200">{moat} pts</span>
+                          </div>
+                          {closestMoat != null ? (
+                            <div className={`text-[10px] ${safe ? 'text-emerald-400' : 'text-amber-400'}`}>
+                              {safe ? `Closest position: ${closestMoat?.toFixed(0)} pts away ✓` : `⚠ Closest position: ${closestMoat?.toFixed(0)} pts — below ${moat} pt minimum!`}
+                            </div>
+                          ) : (
+                            <div className="text-[10px] text-slate-500">No open positions</div>
+                          )}
+                        </div>
+                      );
+                    })()}
+
+                    {/* VIX / Expected Move */}
+                    {telemetry.expected_move && (() => {
+                      const em = telemetry.expected_move;
+                      const vixLevel = em.vix > 25 ? 'Fear' : em.vix > 18 ? 'Elevated' : 'Calm';
+                      const vixColor = em.vix > 25 ? 'text-red-400' : em.vix > 18 ? 'text-amber-400' : 'text-emerald-400';
+                      const vixBorder = em.vix > 25 ? 'border-red-700/60 bg-red-900/10 ring-1 ring-red-500/30' : 'border-slate-700/50 bg-slate-900/50';
+                      return (
+                        <div className={`p-3 rounded border ${vixBorder}`} title="VIX measures implied volatility. Higher VIX = wider expected moves = riskier for credit spreads. 1σ = 68% probability SPX stays within range.">
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-[11px] text-slate-500 font-semibold uppercase">Volatility (VIX)</span>
+                            <span className={`text-sm font-bold font-mono ${vixColor}`}>{em.vix?.toFixed(1)}</span>
+                          </div>
+                          <div className={`text-[10px] ${vixColor}`}>{vixLevel} — 1σ move: ±{em.expected_1sigma} pts</div>
+                          {em.move_consumed_pct != null && em.move_consumed_pct > 0.3 && (
+                            <div className="text-[10px] text-slate-500 mt-0.5">{(em.move_consumed_pct * 100).toFixed(0)}% of expected move already consumed</div>
+                          )}
+                        </div>
+                      );
+                    })()}
+
+                    {/* IB Range + Gap */}
+                    {telemetry.ib_data && (() => {
+                      const ib = telemetry.ib_data;
+                      const isForming = ib.state === 'IB_FORMING';
+                      const hasIB = ib.state === 'IB_ESTABLISHED' && ib.ib_high_spx && ib.ib_low_spx;
+                      const aboveIB = hasIB && telemetry.spx_price > ib.ib_high_spx;
+                      const belowIB = hasIB && telemetry.spx_price < ib.ib_low_spx;
+                      const ibColor = aboveIB ? 'text-emerald-400' : belowIB ? 'text-red-400' : 'text-slate-400';
+                      const ibLabel = aboveIB ? 'Breakout' : belowIB ? 'Breakdown' : 'Inside IB';
+                      const ibBorder = isForming ? 'border-slate-700/30 bg-slate-900/30' : (aboveIB || belowIB) ? 'border-amber-700/50 bg-amber-900/10' : 'border-slate-700/50 bg-slate-900/50';
+                      return (
+                        <div className={`p-3 rounded border ${ibBorder}`} title="Initial Balance = high/low of first 30 minutes (9:30-10:00 ET). Breakout above IB high or breakdown below IB low signals a directional day.">
+                          <div className="flex items-center justify-between mb-1">
+                            <span className="text-[11px] text-slate-500 font-semibold uppercase">Initial Balance</span>
+                            <span className={`text-[10px] font-mono ${ibColor}`}>{isForming ? 'Forming...' : ibLabel}</span>
+                          </div>
+                          {hasIB ? (
+                            <div className="text-xs text-slate-400 font-mono">
+                              {ib.ib_low_spx?.toFixed(0)} — {ib.ib_high_spx?.toFixed(0)}
+                              <span className="text-slate-600 ml-1">({(ib.ib_high_spx - ib.ib_low_spx).toFixed(0)} pts)</span>
+                            </div>
+                          ) : isForming ? (
+                            <div className="text-[10px] text-slate-600">Waiting for 10:00 AM ET...</div>
+                          ) : null}
+                          {Math.abs(ib.gap_pct) >= 0.3 && (
+                            <div className={`text-[10px] mt-0.5 ${ib.gap_pct > 0 ? 'text-emerald-500' : 'text-red-500'}`}>Gap: {ib.gap_pct > 0 ? '+' : ''}{ib.gap_pct.toFixed(2)}%</div>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                </div>
+
+                {/* RIGHT: Key Levels (1/3 width) — vertical price ladder with GEX gamma bars */}
+                <div className="lg:col-span-1 bg-slate-800 border border-slate-700 rounded-lg p-4 shadow-xl">
+                  <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3" title="SPX price levels sorted high to low. Your current price is marked. GEX bars show dealer gamma concentration.">Key Levels</h3>
+                  {keyLevelRows.length > 0 ? (
+                    <div className="space-y-0">
+                      {keyLevelRows.map((row, i) => {
+                        if (row.type === 'spx') {
+                          return (
+                            <div key="spx" className="flex items-center gap-2 py-1.5 my-1 bg-emerald-900/30 border border-emerald-500/40 rounded px-3">
+                              <span className="font-mono font-bold text-emerald-400 w-16 text-sm">{row.level.toFixed(0)}</span>
+                              <span className="text-emerald-400 font-semibold text-xs flex-1">SPX Now</span>
+                              <span className="text-emerald-500 text-[10px] animate-pulse">LIVE</span>
+                            </div>
+                          );
+                        }
+                        const s = typeStyle(row.label);
+                        const dist = Math.abs(spx - row.level);
+                        const gex = gexByStrike[Math.round(row.level)];
+                        const gexMag = gex ? Math.abs(gex.gex) : 0;
+                        const gexPct = gex ? Math.min(100, (gexMag / maxGex) * 100) : 0;
+                        const gexStr = gexMag >= 1e6 ? `${(gexMag/1e6).toFixed(0)}M` : gexMag >= 1e3 ? `${(gexMag/1e3).toFixed(0)}K` : '';
+                        return (
+                          <div key={row.idx} className={`py-1 px-3 border-l-2 ${s.border} ${s.bg} cursor-help`} title={row.meaning}>
+                            <div className="flex items-center gap-2">
+                              <span className={`font-mono font-bold w-16 text-sm ${s.text}`}>{row.level.toFixed(0)}</span>
+                              <span className="text-slate-400 text-xs flex-1 truncate">{row.label}</span>
+                              <span className="text-slate-500 text-[11px] font-mono">{dist.toFixed(0)}pts</span>
+                            </div>
+                            {gexPct > 0 && (
+                              <div className="flex items-center gap-2 mt-0.5 ml-16">
+                                <div className="flex-1 h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                                  <div className={`h-full rounded-full ${gex.gex > 0 ? 'bg-emerald-500/50' : 'bg-red-500/50'}`} style={{ width: `${gexPct}%` }}></div>
+                                </div>
+                                <span className={`text-[9px] font-mono font-bold w-10 text-right ${gex.gex > 0 ? 'text-emerald-500' : 'text-red-500'}`}>{gexStr}</span>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
-                  );
-                })()}
+                  ) : (
+                    <div className="text-[10px] text-slate-600">No key levels available</div>
+                  )}
+                </div>
               </div>
             </div>
             );
           })()}
 
-          {/* ===== RAW DASHBOARD (collapsible, collapsed by default) ===== */}
+          {/* ===== RAW DASHBOARD (collapsible, expanded by default) ===== */}
           <button
             onClick={() => setShowRaw(prev => !prev)}
             className="w-full flex items-center justify-between bg-slate-800/70 hover:bg-slate-800 border border-slate-700 rounded-lg px-5 py-3 transition-colors group"
@@ -1112,46 +1260,76 @@ export default function App() {
               </div>
             )}
 
-            {/* --- SYSTEM ACCURACY (shown only when sufficient data) --- */}
-            {telemetry?.accuracy_stats?.data_sufficient && (
+            {/* --- SIGNAL SCORECARD (shown only when sufficient data) --- */}
+            {telemetry?.accuracy_stats?.data_sufficient && (() => {
+              const s = telemetry.accuracy_stats;
+              const overallColor = s.overall_pct >= 80 ? 'text-emerald-400' : s.overall_pct >= 60 ? 'text-amber-400' : 'text-red-400';
+              const exitColor = (s.exit_pct ?? 0) >= 70 ? 'text-emerald-400' : (s.exit_pct ?? 0) >= 50 ? 'text-amber-400' : 'text-red-400';
+              const holdColor = (s.hold_pct ?? 0) >= 80 ? 'text-emerald-400' : (s.hold_pct ?? 0) >= 60 ? 'text-amber-400' : 'text-red-400';
+              const valueColor = (s.net_signal_value ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400';
+              return (
               <div className="mb-4 bg-slate-900/80 rounded-lg p-3 border border-slate-700">
-                <div className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2" title="Tracks whether the system's exit/hold signals were correct based on actual outcomes. Exit accuracy = % of exit signals that fired on losing trades. Hold accuracy = % of hold signals on winning trades.">System Accuracy (Live Tracking)</div>
+                <div className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2" title="Measures signal quality: when the system said 'close', was it right? When it said 'hold', was it right? Measured in dollars saved/earned.">Signal Scorecard</div>
+                <div className="text-center mb-2">
+                  <div className={`text-2xl font-bold ${overallColor}`}>{s.overall_pct}%</div>
+                  <div className="text-[10px] text-slate-500">{s.overall_correct}/{s.overall_total} signals correct</div>
+                </div>
                 <div className="grid grid-cols-2 gap-3 text-center">
-                  <div>
-                    <div className="text-[10px] text-slate-500">Exit Signal Accuracy</div>
-                    <div className={`text-lg font-bold ${
-                      telemetry.accuracy_stats.exit_accuracy_pct >= 70 ? 'text-emerald-400' :
-                      telemetry.accuracy_stats.exit_accuracy_pct >= 50 ? 'text-amber-400' : 'text-red-400'
-                    }`}>
-                      {telemetry.accuracy_stats.exit_accuracy_pct != null
-                        ? `${telemetry.accuracy_stats.exit_accuracy_pct}%`
-                        : '—'}
+                  <div className="bg-slate-800/60 rounded p-2">
+                    <div className="text-[10px] text-slate-500 mb-1">Exit Signals</div>
+                    <div className={`text-sm font-bold ${exitColor}`}>
+                      {s.exit_pct != null ? `${s.exit_pct}%` : '—'}
                     </div>
                     <div className="text-[10px] text-slate-500">
-                      {telemetry.accuracy_stats.exit_on_losing_trades}/{telemetry.accuracy_stats.exit_signals_total} exit calls on losing trades
+                      {s.exit_correct}/{s.exit_total} correct
+                      {s.exit_premature > 0 && <span className="text-amber-500"> · {s.exit_premature} early</span>}
+                    </div>
+                    <div className={`text-[10px] font-mono mt-1 ${s.exit_savings_total >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                      {s.exit_savings_total >= 0 ? '+' : ''}{s.exit_savings_total != null ? `$${s.exit_savings_total.toFixed(2)}` : '—'} saved
                     </div>
                   </div>
-                  <div>
-                    <div className="text-[10px] text-slate-500">Hold Signal Accuracy</div>
-                    <div className={`text-lg font-bold ${
-                      telemetry.accuracy_stats.hold_accuracy_pct >= 70 ? 'text-emerald-400' :
-                      telemetry.accuracy_stats.hold_accuracy_pct >= 50 ? 'text-amber-400' : 'text-red-400'
-                    }`}>
-                      {telemetry.accuracy_stats.hold_accuracy_pct != null
-                        ? `${telemetry.accuracy_stats.hold_accuracy_pct}%`
-                        : '—'}
+                  <div className="bg-slate-800/60 rounded p-2">
+                    <div className="text-[10px] text-slate-500 mb-1">Hold Signals</div>
+                    <div className={`text-sm font-bold ${holdColor}`}>
+                      {s.hold_pct != null ? `${s.hold_pct}%` : '—'}
                     </div>
                     <div className="text-[10px] text-slate-500">
-                      {telemetry.accuracy_stats.hold_on_winning_trades}/{telemetry.accuracy_stats.hold_signals_total} hold calls on winning trades
+                      {s.hold_correct}/{s.hold_total} correct
+                      {s.hold_wrong > 0 && <span className="text-red-400"> · {s.hold_wrong} wrong</span>}
+                    </div>
+                    <div className={`text-[10px] font-mono mt-1 ${s.hold_earnings_total >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                      {s.hold_earnings_total >= 0 ? '+' : ''}{s.hold_earnings_total != null ? `$${s.hold_earnings_total.toFixed(2)}` : '—'} earned
                     </div>
                   </div>
                 </div>
+                <div className={`text-center mt-2 text-xs font-bold ${valueColor}`}>
+                  Net signal value: {s.net_signal_value >= 0 ? '+' : ''}${s.net_signal_value?.toFixed(2)}/contract
+                </div>
+                {s.per_action && Object.keys(s.per_action).length > 0 && (
+                  <div className="mt-2 border-t border-slate-700 pt-2">
+                    <div className="text-[10px] text-slate-500 mb-1">Per-Action Breakdown</div>
+                    <div className="flex flex-wrap gap-1">
+                      {Object.entries(s.per_action).map(([action, data]) => (
+                        <span key={action} className="text-[10px] bg-slate-800 rounded px-1.5 py-0.5">
+                          <span className="text-slate-400">{action}:</span>{' '}
+                          <span className={data.pct >= 70 ? 'text-emerald-400' : data.pct >= 50 ? 'text-amber-400' : 'text-red-400'}>
+                            {data.correct}/{data.total}
+                          </span>
+                          <span className={`ml-1 ${data.savings >= 0 ? 'text-emerald-500' : 'text-red-500'}`}>
+                            ({data.savings >= 0 ? '+' : ''}${data.savings.toFixed(2)})
+                          </span>
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 <div className="text-[10px] text-slate-600 mt-2 text-center">
-                  Based on {telemetry.accuracy_stats.total_resolved} resolved signals
-                  {telemetry.accuracy_stats.total_unresolved > 0 && ` (${telemetry.accuracy_stats.total_unresolved} pending)`}
+                  Based on {s.total_resolved} resolved signals
+                  {s.total_pending > 0 && ` (${s.total_pending} tracking)`}
                 </div>
               </div>
-            )}
+              );
+            })()}
 
             {/* --- POSITION SUMMARY (Iron Condor View) --- */}
             {telemetry?.position_summary && telemetry.position_summary.positions_total > 0 && (() => {
@@ -1161,8 +1339,8 @@ export default function App() {
                 <div className="mb-4 bg-slate-900/80 rounded-lg p-3 border border-slate-700">
                   <div className="flex justify-between items-center mb-2">
                     <span className="text-xs font-bold text-slate-400 uppercase tracking-wider">{ps.structure.replace('_', ' ')}</span>
-                    <span className={`text-sm font-bold ${ps.total_estimated_pl >= 0 ? 'text-emerald-400' : 'text-red-400'}`} title="Rough model estimate — not real options pricing">
-                      ~P/L: {ps.total_estimated_pl >= 0 ? '+' : ''}${ps.total_estimated_pl.toFixed(2)}
+                    <span className={`text-sm font-bold ${ps.total_estimated_pl >= 0 ? 'text-emerald-400' : 'text-red-400'}`} title={telemetry.positions?.some(p => p.pricing_source === 'LIVE' || p.pricing_source === 'SPXW') ? 'Includes live ThetaData pricing' : 'Rough model estimate'}>
+                      {telemetry.positions?.some(p => p.pricing_source === 'LIVE' || p.pricing_source === 'SPXW') ? '' : '~'}P/L: {ps.total_estimated_pl >= 0 ? '+' : ''}${ps.total_estimated_pl.toFixed(2)}
                     </span>
                   </div>
                   <div className="grid grid-cols-3 gap-2 text-center text-xs">
@@ -1248,8 +1426,9 @@ export default function App() {
                 <option>Put Spread</option><option>Call Spread</option>
               </select>
               <div className="flex gap-2">
-                <input type="text" placeholder="SPX Strike" className="w-1/2 bg-slate-900 border border-slate-600 rounded p-2 text-slate-200 outline-none" value={newPosition.strike} onChange={e => { setNewPosition({...newPosition, strike: e.target.value}); setTradeAnalysis(null); }}/>
-                <input type="text" placeholder="Credit ($)" className="w-1/2 bg-slate-900 border border-slate-600 rounded p-2 text-slate-200 outline-none" value={newPosition.credit} onChange={e => { setNewPosition({...newPosition, credit: e.target.value}); setTradeAnalysis(null); }}/>
+                <input type="text" placeholder="SPX Strike" className="w-1/3 bg-slate-900 border border-slate-600 rounded p-2 text-slate-200 outline-none" value={newPosition.strike} onChange={e => { setNewPosition({...newPosition, strike: e.target.value}); setTradeAnalysis(null); }}/>
+                <input type="text" placeholder="Credit ($)" className="w-1/3 bg-slate-900 border border-slate-600 rounded p-2 text-slate-200 outline-none" value={newPosition.credit} onChange={e => { setNewPosition({...newPosition, credit: e.target.value}); setTradeAnalysis(null); }}/>
+                <input type="text" placeholder="Lots" title="Number of contracts (for account-risk sizing)" className="w-1/3 bg-slate-900 border border-slate-600 rounded p-2 text-slate-200 outline-none" value={newPosition.contracts} onChange={e => { setNewPosition({...newPosition, contracts: e.target.value}); }}/>
               </div>
               <div className="flex gap-2">
                 <button type="button" onClick={analyzeTrade} disabled={analyzingTrade || !newPosition.strike || !newPosition.credit} className="w-1/2 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-700 disabled:text-slate-500 text-white font-bold py-2 px-4 rounded transition-colors">
@@ -1385,9 +1564,30 @@ export default function App() {
                           <div className="font-bold text-slate-100">{pos.type} @ {pos.strike}</div>
                           <div className="flex items-center gap-2 text-xs text-slate-400">
                             <span>Credit: ${pos.credit}</span>
-                            <span className={`font-bold ${pos.estimated_pl >= 0 ? 'text-emerald-400' : 'text-red-400'}`} title="Rough model estimate — not real options pricing">
-                              ~P/L: {pos.estimated_pl >= 0 ? '+' : ''}${pos.estimated_pl?.toFixed(2)}
+                            <span className={`font-bold ${pos.estimated_pl >= 0 ? 'text-emerald-400' : 'text-red-400'}`} title={pos.pricing_source === 'LIVE' || pos.pricing_source === 'SPXW' ? 'Live mid-price from ThetaData' : 'Rough model estimate — not real options pricing'}>
+                              {pos.pricing_source === 'LIVE' || pos.pricing_source === 'SPXW' ? '' : '~'}P/L: {pos.estimated_pl >= 0 ? '+' : ''}${pos.estimated_pl?.toFixed(2)}
                             </span>
+                            {pos.pricing_source === 'SPXW' ? (
+                              <span className="text-[10px] font-bold text-cyan-400 bg-cyan-400/10 px-1.5 py-0.5 rounded" title="Direct SPX options pricing from ThetaData">SPXW</span>
+                            ) : pos.pricing_source === 'LIVE' ? (
+                              <span className="text-[10px] font-bold text-emerald-400 bg-emerald-400/10 px-1.5 py-0.5 rounded" title="Live SPY proxy pricing from ThetaData">LIVE</span>
+                            ) : (
+                              <span className="text-[10px] font-bold text-slate-500 bg-slate-700/50 px-1.5 py-0.5 rounded">EST</span>
+                            )}
+                            {pos.trend_continuation ? (
+                              <span className="text-[10px] font-bold text-amber-400 bg-amber-400/10 px-1.5 py-0.5 rounded" title="P0-2: trend-continuation regime (negative GEX / surge) — a with-trend short is force-exited, not held.">TREND-CONT</span>
+                            ) : pos.mean_reverting ? (
+                              <span className="text-[10px] font-bold text-cyan-400 bg-cyan-400/10 px-1.5 py-0.5 rounded" title="P0-2: mean-reverting regime (positive GEX) — holding the bounce is allowed; exits are not forced.">MEAN-REV</span>
+                            ) : null}
+                            {pos.buyback_trend && pos.buyback_trend !== 'NEW' && pos.buyback_samples >= 3 && (
+                              <span className={`text-[10px] font-mono px-1 py-0.5 rounded ${
+                                pos.buyback_trend === 'FALLING' ? 'text-emerald-400 bg-emerald-400/10' :
+                                pos.buyback_trend === 'RISING' ? 'text-red-400 bg-red-400/10' :
+                                'text-slate-400 bg-slate-700/30'
+                              }`} title={`Premium ${pos.buyback_trend.toLowerCase()}: ${pos.buyback_velocity > 0 ? '+' : ''}$${pos.buyback_velocity?.toFixed(3)}/min (${pos.buyback_samples} samples)`}>
+                                {pos.buyback_trend === 'FALLING' ? '\u25BC' : pos.buyback_trend === 'RISING' ? '\u25B2' : '\u2500'} ${Math.abs(pos.buyback_velocity || 0).toFixed(3)}/m
+                              </span>
+                            )}
                             {pos.breakeven_event && (
                               <span className="font-bold text-yellow-400 animate-pulse">
                                 BREAKEVEN ({pos.breakeven_event.touch_count}x)
@@ -1528,8 +1728,12 @@ export default function App() {
                         p.verdict === 'STRONG_ENTRY' ? 'bg-emerald-700 text-emerald-100' : 'bg-blue-700 text-blue-100'
                       }`}>{p.score}/100 {p.verdict.replace('_', ' ')}</span>
                     </div>
-                    <div className="text-xs text-slate-400">
-                      Est. credit: ${p.estimated_credit} | Moat: {p.moat} pts
+                    <div className="flex items-center gap-2 text-xs text-slate-400">
+                      <span>{p.credit_source === 'EST' ? '~' : ''}Credit: ${p.estimated_credit}</span>
+                      {p.credit_source && p.credit_source !== 'EST' && (
+                        <span className={`text-[9px] font-bold px-1 py-0.5 rounded ${p.credit_source === 'SPXW' ? 'text-cyan-400 bg-cyan-400/10' : 'text-emerald-400 bg-emerald-400/10'}`}>{p.credit_source}</span>
+                      )}
+                      <span>Moat: {p.moat} pts</span>
                     </div>
                     {p.reasons_for?.length > 0 && (
                       <div className="text-[10px] text-emerald-400 mt-1">+ {p.reasons_for[0]}</div>

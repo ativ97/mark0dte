@@ -12,9 +12,48 @@ from config import (
     MOAT_BAR_SCALE, BREACH_VERIFICATION_MINUTES,
     STATE_A_MIN_MOAT, STATE_B_MIN_MOAT, STATE_C_MIN_MOAT,
     MARKET_CLOSE_HOUR_ET, GAMMA_ACCELERATION_HOUR_ET, FINAL_HOUR_MOAT_MULTIPLIER,
+    SPREAD_WIDTH_SPX, ACCOUNT_SIZE, MAX_RISK_PER_TRADE, MAX_RISK_WARN,
 )
+from data_fetcher import get_spread_buyback_price
 
 logger = logging.getLogger("0DTE-QuantEngine")
+
+
+def calculate_position_risk(contracts, spread_width=SPREAD_WIDTH_SPX, credit=0.0,
+                            account_size=None, max_risk=None, warn_risk=None):
+    """P0-3 sizing guardrail (added 2026-05-29).
+
+    Max loss on a defined-risk credit spread = (width - credit) * 100 * contracts.
+    Returns dollars at risk, % of account, whether it breaches the per-trade cap, and
+    the largest contract count that fits the cap. Pure function — unit-tested. The
+    engine is currently contract-count-blind (see P0-3a); wire `contracts` from the
+    position record to surface this in the UI.
+    """
+    account_size = ACCOUNT_SIZE if account_size is None else account_size
+    max_risk = MAX_RISK_PER_TRADE if max_risk is None else max_risk
+    warn_risk = MAX_RISK_WARN if warn_risk is None else warn_risk
+    try:
+        contracts = max(0, int(contracts))
+    except (TypeError, ValueError):
+        contracts = 1
+    try:
+        credit = float(credit)
+    except (TypeError, ValueError):
+        credit = 0.0
+    per_contract = max(0.0, (spread_width - credit)) * 100.0
+    max_loss = per_contract * contracts
+    pct = (max_loss / account_size * 100.0) if account_size > 0 else 0.0
+    max_contracts = int(max_risk // per_contract) if per_contract > 0 else 0
+    return {
+        "contracts": contracts,
+        "max_loss": round(max_loss, 2),
+        "pct_of_account": round(pct, 1),
+        "over_limit": max_loss > max_risk,
+        "warn_limit": max_loss > warn_risk,
+        "max_contracts_allowed": max_contracts,
+        "cap": round(max_risk, 2),
+        "warn": round(warn_risk, 2),
+    }
 
 # ---- RECOMMENDATION STATE TRACKER ----
 # Tracks per-position recommendation state to prevent flip-flopping.
@@ -511,11 +550,23 @@ def _check_market_events(now_et: datetime) -> dict:
     if not events:
         events.append("No special events detected")
 
+    # Phase 9G: Track scheduled event time for post-event detection
+    event_time_et = None  # hour in ET (e.g., 14.0 = 2:00 PM)
+    if (month, day) in fomc_minutes_dates_2026:
+        event_time_et = 14.0
+    elif (month, day) in fomc_dates_2026:
+        event_time_et = 14.0
+    elif 10 <= day <= 15 and weekday in (1, 2):  # CPI
+        event_time_et = 8.5
+    elif weekday == 4 and day <= 7:  # NFP
+        event_time_et = 8.5
+
     return {
         "events": events,
         "moat_multiplier": round(moat_multiplier, 2),
         "risk_level": risk_level,
         "day_of_week": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"][weekday],
+        "event_time_et": event_time_et,
     }
 
 
@@ -858,6 +909,12 @@ def analyze_market_regime(df: pd.DataFrame) -> dict:
     elif directional_bias == "LEAN BULLISH" and momentum["change_2h_pct"] > 0.5:
         directional_bias = "BULLISH"
 
+    # Escalate to STRONG when ER confirms a sustained directional day
+    if directional_bias == "BULLISH" and er >= 0.40 and rsi > 65 and momentum["change_2h_pct"] > 0.4:
+        directional_bias = "STRONG BULLISH"
+    elif directional_bias == "BEARISH" and er >= 0.40 and rsi < 35 and momentum["change_2h_pct"] < -0.4:
+        directional_bias = "STRONG BEARISH"
+
     # --- State routing ---
     if regime_score <= 1:
         state = "STATE A: TRENDING"
@@ -907,7 +964,9 @@ def compute_smart_moat(regime_data: dict, spx_price: float,
                         vix_based_moat: float = None,
                         gex_data: dict = None,
                         expected_move_data: dict = None,
-                        day_open_spx: float = None) -> dict:
+                        day_open_spx: float = None,
+                        surge_data: dict = None,
+                        ib_data: dict = None) -> dict:
     """
     PHASE 4: Smart Moat System.
     Adjusts the effective moat based on:
@@ -1017,26 +1076,43 @@ def compute_smart_moat(regime_data: dict, spx_price: float,
     # ---- 7. MOVE-CONSUMED FACTOR (C4) ----
     # If SPX has already moved significantly from the open, the remaining expected
     # move is smaller. This makes tighter moats acceptable after big moves.
-    # Example: 1σ consumed → factor 0.85, 2σ consumed → factor 0.70
+    # HOWEVER: only shrink if the move was efficient (high ER = clean trend).
+    # A violent flush (low ER) means vol is expanding, NOT exhausting.
+    # ER >= 0.30: full shrink (efficient trend consuming range)
+    # ER 0.15-0.30: half effect (ambiguous, partial credit)
+    # ER < 0.15: no shrink (volatile/choppy = range likely expanding)
     move_consumed_factor = 1.0
     move_consumed_pct = 0.0
-    if expected_move_data and expected_move_data.get("move_consumed_pct", 0) > 0.3:
+    move_consumed_blocked = False
+    is_trend_surge = surge_data and surge_data.get("surge_type") == "TREND_SURGE"
+    if is_trend_surge:
+        move_consumed_blocked = True
+    elif expected_move_data and expected_move_data.get("move_consumed_pct", 0) > 0.3:
         move_consumed_pct = expected_move_data["move_consumed_pct"]
-        # Scale: 0.3σ → no effect, 1.0σ → 0.85, 2.0σ → 0.70
-        # Capped at 0.65 floor so we never go too aggressive
-        move_consumed_factor = max(0.65, 1.0 - (move_consumed_pct - 0.3) * 0.20)
+        if er_value >= 0.30:
+            move_consumed_factor = max(0.65, 1.0 - (move_consumed_pct - 0.3) * 0.20)
+        elif er_value >= 0.15:
+            move_consumed_factor = max(0.85, 1.0 - (move_consumed_pct - 0.3) * 0.10)
+        else:
+            move_consumed_factor = 1.0
+            move_consumed_blocked = True
     elif day_open_spx and day_open_spx > 0 and expected_move_data:
         # Fallback: compute from day_open if expected_move_data didn't include it
         full_day_1sigma = expected_move_data.get("full_day_1sigma", 0)
         if full_day_1sigma > 0:
             move_consumed_pct = abs(spx_price - day_open_spx) / full_day_1sigma
             if move_consumed_pct > 0.3:
-                move_consumed_factor = max(0.65, 1.0 - (move_consumed_pct - 0.3) * 0.20)
+                if er_value >= 0.30:
+                    move_consumed_factor = max(0.65, 1.0 - (move_consumed_pct - 0.3) * 0.20)
+                elif er_value >= 0.15:
+                    move_consumed_factor = max(0.85, 1.0 - (move_consumed_pct - 0.3) * 0.10)
+                else:
+                    move_consumed_factor = 1.0
+                    move_consumed_blocked = True
 
     # ---- COMBINE FACTORS ----
     # Apply all factors to the base moat, with a floor
     combined_factor = range_moat_factor * signal_moat_factor * time_moat_factor * exhaustion_factor * event_factor * gex_factor * move_consumed_factor
-    smart_moat = max(WARNING_ZONE_THRESHOLD + 5, round(base_moat * combined_factor))
 
     # Build explanation for the UI
     adjustments = []
@@ -1055,8 +1131,33 @@ def compute_smart_moat(regime_data: dict, spx_price: float,
     if gex_factor != 1.0:
         direction = "tightened" if gex_factor < 1 else "widened"
         adjustments.append(f"GEX {gex_label}")
-    if move_consumed_factor != 1.0:
+    if move_consumed_blocked and is_trend_surge:
+        adjustments.append(f"TREND SURGE active — moat held wide (do NOT shrink)")
+    elif move_consumed_blocked:
+        adjustments.append(f"Move consumed {move_consumed_pct:.1f}σ but ER {er_value:.2f} too low — moat held wide")
+    elif move_consumed_factor != 1.0:
         adjustments.append(f"Move consumed {move_consumed_pct:.1f}σ (×{move_consumed_factor:.2f})")
+
+    # Factor 8: IB breakout — confirmed directional day widens moat
+    ib_factor = 1.0
+    if ib_data and ib_data.get("state") == "IB_ESTABLISHED":
+        ib_high = ib_data.get("ib_high_spx", 0)
+        ib_low = ib_data.get("ib_low_spx", 0)
+        ib_width = ib_high - ib_low if ib_high > ib_low else 0
+        if ib_width > 0:
+            breakout_dist = max(spx_price - ib_high, ib_low - spx_price, 0)
+            ib_extensions = breakout_dist / ib_width
+            if ib_extensions >= 3.0:
+                ib_factor = 1.15
+                adjustments.append(f"IB breakout {ib_extensions:.1f}× (×1.15)")
+            elif ib_extensions >= 2.0:
+                ib_factor = 1.10
+                adjustments.append(f"IB breakout {ib_extensions:.1f}× (×1.10)")
+            elif ib_extensions >= 1.0:
+                ib_factor = 1.05
+                adjustments.append(f"IB breakout {ib_extensions:.1f}× (×1.05)")
+    combined_factor *= ib_factor
+    smart_moat = max(WARNING_ZONE_THRESHOLD + 5, round(base_moat * combined_factor))
 
     vix_note = f" (VIX-based)" if vix_based_moat is not None else f" (regime)"
     moat_explanation = (
@@ -1076,6 +1177,298 @@ def compute_smart_moat(regime_data: dict, spx_price: float,
         "gex_label": gex_label,
         "move_consumed_factor": round(move_consumed_factor, 3),
         "move_consumed_pct": round(move_consumed_pct, 2),
+        "move_consumed_blocked": move_consumed_blocked,
+    }
+
+
+def calculate_portfolio_heat(db_positions, directional_bias: str = "NEUTRAL") -> dict:
+    """
+    Portfolio-level concentration risk assessment.
+    Flags when all positions are on the same side (e.g., all Calls = 100% top-side exposure).
+    """
+    call_count = sum(1 for p in db_positions if p.type == "Call Spread")
+    put_count = sum(1 for p in db_positions if p.type == "Put Spread")
+    total = call_count + put_count
+
+    heat = {
+        "call_count": call_count,
+        "put_count": put_count,
+        "total": total,
+        "warning": None,
+        "level": "SAFE",
+    }
+
+    if total == 0:
+        return heat
+
+    if total >= 2 and call_count == total:
+        heat["level"] = "DANGER"
+        heat["warning"] = "100% TOP-SIDE EXPOSURE. All positions are Call Spreads. Hedge via Put Spread recommended."
+        if "BULLISH" in directional_bias:
+            heat["warning"] += f" Bias is {directional_bias} — risk amplified."
+    elif total >= 2 and put_count == total:
+        heat["level"] = "DANGER"
+        heat["warning"] = "100% BOTTOM-SIDE EXPOSURE. All positions are Put Spreads. Hedge via Call Spread recommended."
+        if "BEARISH" in directional_bias:
+            heat["warning"] += f" Bias is {directional_bias} — risk amplified."
+    elif total >= 3 and (call_count / total >= 0.75 or put_count / total >= 0.75):
+        dominant = "Call" if call_count > put_count else "Put"
+        heat["level"] = "IMBALANCED"
+        heat["warning"] = f"Heavy {dominant} skew ({call_count}C / {put_count}P). Consider balancing exposure."
+
+    return heat
+
+
+def detect_surge(spx_price: float, snapshots: list, er_value: float,
+                 hours_remaining: float = 6.5) -> dict:
+    """
+    Rolling surge detector — identifies sudden large moves at ANY time of day.
+    Uses the ring buffer snapshots to compute a ~20-min price change.
+    Classifies as TREND_SURGE (ER>0.30, institutional), VOLATILE_SURGE (ER<0.30, news),
+    or NONE. Includes a fade_multiplier that decays from 1.0 to 0.0 over 4 hours,
+    allowing fading to resume as the surge ages.
+    """
+    result = {
+        "surge_type": "NONE",
+        "surge_pct": 0.0,
+        "surge_direction": "NEUTRAL",
+        "fade_multiplier": 0.0,
+        "message": None,
+    }
+
+    if not snapshots or len(snapshots) < 2:
+        return result
+
+    # Use the oldest available snapshot (up to ~5 snapshots back = ~2.5min × 5 ≈ 12-15min)
+    oldest = snapshots[0]
+    oldest_price = oldest.get("spx_price", 0)
+    if oldest_price <= 0:
+        return result
+
+    change_pct = ((spx_price - oldest_price) / oldest_price) * 100
+
+    # Threshold: 0.4% in the snapshot window qualifies as a surge
+    if abs(change_pct) < 0.4:
+        return result
+
+    result["surge_pct"] = round(change_pct, 3)
+    result["surge_direction"] = "BULLISH" if change_pct > 0 else "BEARISH"
+
+    if er_value >= 0.30:
+        result["surge_type"] = "TREND_SURGE"
+        result["message"] = (
+            f"SPX {'surged' if change_pct > 0 else 'plunged'} {abs(change_pct):.1f}% "
+            f"with ER {er_value:.2f}. Institutional flow — do NOT fade."
+        )
+    else:
+        result["surge_type"] = "VOLATILE_SURGE"
+        result["message"] = (
+            f"SPX {'spiked' if change_pct > 0 else 'dropped'} {abs(change_pct):.1f}% "
+            f"with ER {er_value:.2f}. Volatile/news-driven — may partially revert."
+        )
+
+    # Fade multiplier: decays from 1.0 (surge just happened) toward 0.0 (4h later).
+    # At the time of detection the multiplier is 1.0.
+    # The actual time-decay is applied externally based on how long the surge has been active.
+    # For now, base it on hours_remaining: earlier in the day = more time for trend to continue.
+    if hours_remaining > 4.0:
+        result["fade_multiplier"] = 1.0   # morning surge — maximum protection
+    elif hours_remaining > 2.0:
+        result["fade_multiplier"] = 0.75  # midday — high protection
+    elif hours_remaining > 1.0:
+        result["fade_multiplier"] = 0.40  # afternoon — moderate
+    else:
+        result["fade_multiplier"] = 0.15  # final hour — theta dominates, minimal protection
+
+    return result
+
+
+def compute_initial_balance(df: pd.DataFrame, day_open_spx: float = None,
+                            prev_close_spx: float = None,
+                            spx_spy_ratio: float = 10.0) -> dict:
+    """
+    Computes 30-minute Initial Balance (IB) from SPY bars and derives gap %.
+    IB = high/low of first 30 minutes of trading (9:30-10:00 ET).
+    Returns IB levels in SPX terms and gap_pct from previous close.
+    """
+    result = {
+        "state": "UNAVAILABLE",
+        "gap_pct": 0.0,
+        "ib_high_spx": None,
+        "ib_low_spx": None,
+    }
+
+    if df is None or df.empty:
+        return result
+
+    # Compute gap % if we have previous close and day open
+    if prev_close_spx and prev_close_spx > 0 and day_open_spx and day_open_spx > 0:
+        result["gap_pct"] = round(((day_open_spx - prev_close_spx) / prev_close_spx) * 100, 3)
+
+    # Convert index to US/Eastern for time slicing
+    try:
+        df_et = df.copy()
+        if df_et.index.tz is None:
+            df_et.index = df_et.index.tz_localize("UTC")
+        df_et.index = df_et.index.tz_convert("US/Eastern")
+
+        now_et = datetime.now(ZoneInfo("US/Eastern"))
+        market_open_time = now_et.replace(hour=10, minute=0, second=0, microsecond=0)
+
+        if now_et < market_open_time:
+            result["state"] = "IB_FORMING"
+            return result
+
+        # Extract first 30 minutes of bars (09:30 - 09:59)
+        ib_mask = (df_et.index.hour == 9) & (df_et.index.minute >= 30)
+        ib_bars = df_et[ib_mask]
+
+        if ib_bars.empty:
+            return result
+
+        # IB in SPY terms → convert to SPX
+        ib_high_spy = ib_bars["High"].max()
+        ib_low_spy = ib_bars["Low"].min()
+        result["ib_high_spx"] = round(ib_high_spy * spx_spy_ratio, 2)
+        result["ib_low_spx"] = round(ib_low_spy * spx_spy_ratio, 2)
+        result["state"] = "IB_ESTABLISHED"
+
+    except Exception as e:
+        logger.warning(f"IB computation failed: {e}")
+
+    return result
+
+
+def detect_gap_rejection(spx_price: float, ib_data: dict) -> dict:
+    """
+    Gap & Crap detection: if market gapped > 0.5% but price broke below IB low
+    (for gap up) or above IB high (for gap down), it's a gap rejection — strong
+    directional signal OPPOSITE to the gap.
+    """
+    result = {"rejected": False, "direction": None, "message": None}
+
+    if ib_data.get("state") != "IB_ESTABLISHED":
+        return result
+
+    gap_pct = ib_data.get("gap_pct", 0)
+    ib_high = ib_data.get("ib_high_spx")
+    ib_low = ib_data.get("ib_low_spx")
+
+    if ib_high is None or ib_low is None:
+        return result
+
+    if gap_pct >= 0.5 and spx_price < ib_low:
+        result["rejected"] = True
+        result["direction"] = "BEARISH"
+        result["message"] = (
+            f"GAP REJECTED: Opened +{gap_pct:.1f}% but broke below IB low ({ib_low:.0f}). "
+            f"Bearish divergence — rally failed."
+        )
+    elif gap_pct <= -0.5 and spx_price > ib_high:
+        result["rejected"] = True
+        result["direction"] = "BULLISH"
+        result["message"] = (
+            f"GAP REJECTED: Opened {gap_pct:.1f}% but broke above IB high ({ib_high:.0f}). "
+            f"Bullish divergence — selloff rejected."
+        )
+
+    return result
+
+
+def detect_post_event_shift(
+    market_events: dict,
+    snapshots: list,
+    current_spx: float,
+    current_er: float,
+    current_rsi: float,
+    current_range_pos: float,
+) -> dict | None:
+    """
+    Phase 9H: Detect regime shift after a scheduled event (FOMC, CPI, NFP).
+
+    Compares current indicators vs the last pre-event snapshot.
+    Returns shift analysis if we're in the 5-30 min post-event window.
+    Returns None if no event today or not in the post-event window.
+    """
+    event_time_et = market_events.get("event_time_et")
+    if event_time_et is None:
+        return None
+
+    # Compute current time in ET
+    now_utc = datetime.now(timezone.utc)
+    now_et = now_utc.astimezone(ZoneInfo("US/Eastern"))
+    now_hour = now_et.hour + now_et.minute / 60.0
+
+    # Only active in 5-30 min post-event window
+    minutes_since_event = (now_hour - event_time_et) * 60
+    if minutes_since_event < 5 or minutes_since_event > 30:
+        return None
+
+    # Find last snapshot BEFORE event time
+    pre_event_snapshot = None
+    for snap in snapshots:
+        snap_ts = snap.get("timestamp", "")
+        if snap_ts:
+            try:
+                snap_utc = datetime.strptime(snap_ts, "%Y-%m-%d %H:%M:%S UTC").replace(tzinfo=timezone.utc)
+                snap_et = snap_utc.astimezone(ZoneInfo("US/Eastern"))
+                snap_hour = snap_et.hour + snap_et.minute / 60.0
+                if snap_hour < event_time_et:
+                    pre_event_snapshot = snap
+            except (ValueError, TypeError):
+                continue
+
+    if pre_event_snapshot is None:
+        return {
+            "phase": "POST_EVENT",
+            "minutes_since": round(minutes_since_event, 1),
+            "shift_type": "UNKNOWN",
+            "message": f"Post-event window active ({round(minutes_since_event)}min). No pre-event snapshot available.",
+            "spx_move_pts": 0.0,
+        }
+
+    # Compute deltas
+    pre_spx = pre_event_snapshot.get("spx_price", current_spx)
+    pre_er = pre_event_snapshot.get("er_value", current_er)
+    pre_rsi = pre_event_snapshot.get("rsi_14", current_rsi)
+
+    spx_move = current_spx - pre_spx
+    spx_move_abs = abs(spx_move)
+    er_delta = current_er - pre_er
+    rsi_delta = current_rsi - pre_rsi
+
+    # Classify the shift
+    if spx_move_abs >= 15 and abs(er_delta) >= 0.10:
+        shift_type = "EVENT_BREAKOUT"
+        direction = "BULLISH" if spx_move > 0 else "BEARISH"
+        message = (f"EVENT BREAKOUT: SPX moved {spx_move:+.1f} pts since event "
+                   f"({round(minutes_since_event)}min ago). ER shifted {er_delta:+.2f}. "
+                   f"Strong {direction.lower()} continuation — widen moats on exposed side.")
+    elif spx_move_abs >= 10 and abs(rsi_delta) >= 5:
+        shift_type = "EVENT_REVERSAL" if (spx_move > 0 and rsi_delta < 0) or (spx_move < 0 and rsi_delta > 0) else "EVENT_SPIKE"
+        direction = "BULLISH" if spx_move > 0 else "BEARISH"
+        message = (f"EVENT {shift_type.split('_')[1]}: SPX moved {spx_move:+.1f} pts, "
+                   f"RSI shifted {rsi_delta:+.1f}. "
+                   f"{'Conflicting signals — possible reversal.' if shift_type == 'EVENT_REVERSAL' else 'Momentum building.'}")
+    elif spx_move_abs < 5:
+        shift_type = "EVENT_ABSORBED"
+        message = (f"Event absorbed: SPX moved only {spx_move:+.1f} pts in {round(minutes_since_event)}min. "
+                   f"Market shrugged it off — normal trading resumes.")
+    else:
+        shift_type = "EVENT_DIGESTING"
+        direction = "BULLISH" if spx_move > 0 else "BEARISH"
+        message = (f"Post-event: SPX {spx_move:+.1f} pts ({direction.lower()}). "
+                   f"Still digesting — watch for follow-through or fade.")
+
+    return {
+        "phase": "POST_EVENT",
+        "minutes_since": round(minutes_since_event, 1),
+        "shift_type": shift_type,
+        "spx_move_pts": round(spx_move, 1),
+        "er_delta": round(er_delta, 3),
+        "rsi_delta": round(rsi_delta, 1),
+        "message": message,
+        "pre_event_spx": round(pre_spx, 2),
     }
 
 
@@ -1089,7 +1482,12 @@ def evaluate_positions(db_positions, spx_price: float, db_session,
                        vwap_dev: float = 0.0,
                        gex_data: dict = None,
                        rsi_14: float = 50.0,
-                       er_value: float = 0.5):
+                       er_value: float = 0.5,
+                       surge_data: dict = None,
+                       event_moat_multiplier: float = 1.0,
+                       live_quotes: dict = None,
+                       spx_spy_ratio: float = 10.0,
+                       quote_source: str = "SPY"):
     """
     PHASE 3.2: Enhanced Position Intelligence.
     - Calculates live moats and handles Time-Delayed Verification stops.
@@ -1164,6 +1562,24 @@ def evaluate_positions(db_positions, spx_price: float, db_session,
 
     reversal_score = min(100, reversal_score)
 
+    # Fix #2: Event risk (FOMC/CPI/NFP) suppresses reversal confidence.
+    # Events can cause breakouts that invalidate RSI/GEX mean-reversion signals.
+    if event_moat_multiplier > 1.0:
+        event_penalty = round(15 * (event_moat_multiplier - 1.0) / 0.5)  # 1.3→9, 1.5→15
+        event_penalty = min(event_penalty, 20)
+        reversal_score = max(0, reversal_score - event_penalty)
+        reversal_reasons.append(f"Event risk -{event_penalty} (×{event_moat_multiplier})")
+
+    # Phase 6D: During TREND_SURGE, cap reversal_score. Don't fight institutional flow.
+    # fade_multiplier: 1.0 = surge just happened (cap hard), 0.0 = surge faded (no cap).
+    uncapped_reversal = reversal_score
+    if surge_data and surge_data.get("surge_type") == "TREND_SURGE":
+        fm = surge_data.get("fade_multiplier", 0.0)
+        max_allowed = round(100 * (1.0 - fm))  # fm=1.0 → max=0, fm=0.5 → max=50
+        reversal_score = min(reversal_score, max_allowed)
+        if reversal_score < uncapped_reversal:
+            reversal_reasons.append(f"Capped by TREND_SURGE (fade={fm:.0%})")
+
     for pos in db_positions:
         # --- MARKET CLOSED: Show expired state ---
         if market_closed:
@@ -1178,7 +1594,7 @@ def evaluate_positions(db_positions, spx_price: float, db_session,
             moat_pct = max(0, min(100, (moat / MOAT_BAR_SCALE) * 100))
 
             if expired_itm:
-                estimated_pl = round(-pos.credit * 9, 2)  # max loss on $5-wide spread
+                estimated_pl = round(-(SPREAD_WIDTH_SPX - pos.credit), 2)  # P0-5 fix: max loss/share = width - credit (per-share, consistent with the +credit OTM branch)
                 message = f"EXPIRED IN-THE-MONEY. Max loss realized. SPX closed past strike."
                 status_color = "text-red-500 font-bold"
                 bar_color = "bg-red-500"
@@ -1224,9 +1640,9 @@ def evaluate_positions(db_positions, spx_price: float, db_session,
 
         # 2. Directional risk: is this position on the at-risk side?
         at_risk_side = False
-        if pos.type == 'Put Spread' and directional_bias in ("BEARISH", "LEAN BEARISH"):
+        if pos.type == 'Put Spread' and "BEARISH" in directional_bias:
             at_risk_side = True
-        elif pos.type == 'Call Spread' and directional_bias in ("BULLISH", "LEAN BULLISH"):
+        elif pos.type == 'Call Spread' and "BULLISH" in directional_bias:
             at_risk_side = True
 
         # 2b. Range proximity risk: price pressing toward your side's extreme
@@ -1428,6 +1844,22 @@ def evaluate_positions(db_positions, spx_price: float, db_session,
         buyback_frac = max(0.02, buyback_frac)
         estimated_buyback = round(pos.credit * buyback_frac, 2)
         estimated_pl = round(pos.credit - estimated_buyback, 2)
+        pricing_source = "EST"
+        estimated_buyback_ask = estimated_buyback  # P1-5: realistic ask-side close (= mid until a live quote)
+
+        # Phase 7+9: Override with live ThetaData quote if available
+        if live_quotes:
+            live_price_data = get_spread_buyback_price(
+                live_quotes, pos.type, pos.strike,
+                spx_spy_ratio=spx_spy_ratio,
+                quote_source=quote_source,
+            )
+            if live_price_data and live_price_data["spread_mid"] > 0:
+                estimated_buyback = live_price_data["spread_mid"]
+                estimated_pl = round(pos.credit - estimated_buyback, 2)
+                pricing_source = "LIVE" if quote_source == "SPY" else "SPXW"
+                # P1-5: the honest cost to CLOSE (buy short@ask, sell long@bid) — always >= mid
+                estimated_buyback_ask = live_price_data.get("spread_ask_close", estimated_buyback)
 
         # ---- PREMIUM HISTORY ----
         premium_trend = _update_premium_history(pos.id, estimated_buyback)
@@ -1604,11 +2036,70 @@ def evaluate_positions(db_positions, spx_price: float, db_session,
         if "escalation_level" not in exit_strategy:
             exit_strategy["escalation_level"] = esc_level
 
-        # ---- C2: REVERSAL-AWARE EXIT DOWNGRADE ----
+        # ---- PROFIT-AWARE ESCALATION CAP ----
+        # A profitable position should never show CRITICAL_EJECT or URGENT_CLOSE.
+        # Those labels imply imminent loss, which is misleading when you're up 50%+.
+        # Cap at CLOSE_RECOMMENDED and reframe as profit-taking.
+        profit_pct = ((pos.credit - estimated_buyback) / pos.credit * 100) if pos.credit > 0 else 0
+        # P0-1: only let a PROFIT estimate soften an escalation when the price is trustworthy.
+        # An EST (heuristic) buyback (~$0.40 off; lib pitfall #4) must never downgrade a
+        # CRITICAL_EJECT/URGENT_CLOSE — that would mask real danger on a bad estimate.
+        _price_trustworthy = pricing_source in ("LIVE", "SPXW")
+        if (_price_trustworthy
+                and profit_pct >= 50
+                and moat > GAMMA_TRAP_THRESHOLD
+                and moat <= WARNING_ZONE_THRESHOLD
+                and exit_strategy["escalation_level"] in ("URGENT_CLOSE", "CRITICAL_EJECT")):
+            exit_strategy["escalation_level"] = "CLOSE_RECOMMENDED"
+            profit_dollar = round(pos.credit - estimated_buyback, 2)
+            exit_strategy["action"] = "TAKE_PROFIT"
+            exit_strategy["instruction"] = (
+                f"~{profit_pct:.0f}% profit (${profit_dollar:.2f}/contract). "
+                f"Close at ~${estimated_buyback:.2f} to lock gains. "
+                f"Moat {moat:.0f} pts is below {effective_moat_min} pt minimum — "
+                f"don't let a winner turn into a loser."
+            )
+            # Also cap the escalation state so it doesn't re-escalate next cycle
+            if pos.id in _escalation_state:
+                esc_idx = ESCALATION_LEVELS.index("CLOSE_RECOMMENDED")
+                _escalation_state[pos.id]["level"] = "CLOSE_RECOMMENDED"
+
+        # ---- P0-2: REGIME-CONDITIONAL CONTINUATION GATE (added 2026-05-29) ----
+        # Distinguish a MEAN-REVERTING regime (positive GEX, no surge) — where the
+        # reversal-downgrade / hold is appropriate (validated live 5/29: positive-GEX
+        # oversold bounce, +$1,255) — from a TREND-CONTINUATION regime (negative GEX,
+        # surge, or no positive-GEX support) where a with-trend short must NOT be told
+        # to HOLD once the escalation ladder reaches URGENT/CRITICAL (the 5/13 desync
+        # that cost -$1,696). See docs/IMPLEMENTATION_PLAN.md P0-2 and synthetic_replay.py.
+        _gex_regime = gex_data.get("gex_regime") if gex_data else None
+        _surge_active = bool(surge_data and surge_data.get("surge_type") == "TREND_SURGE"
+                             and surge_data.get("fade_multiplier", 0) > 0.3)
+        mean_reverting = (_gex_regime == "POSITIVE") and not _surge_active
+        trend_continuation = (_gex_regime == "NEGATIVE") or _surge_active
+
+        # P0-2a: outside a mean-reverting regime, never show a HOLD action while the
+        # escalation ladder is at URGENT/CRITICAL. Fixes the final-hour action/escalation
+        # desync the synthetic harness reproduced on the 5/13 trend-through.
+        if (not mean_reverting
+                and exit_strategy.get("escalation_level") in ("URGENT_CLOSE", "CRITICAL_EJECT")
+                and str(exit_strategy["action"]).startswith("HOLD")):
+            exit_strategy["action"] = exit_strategy["escalation_level"]
+            exit_strategy["instruction"] = (
+                f"[TREND CONTINUATION - {exit_strategy['escalation_level']}] "
+                f"No positive-GEX mean-reversion support and the escalation ladder has "
+                f"reached {exit_strategy['escalation_level']}. Exit now - do not hold a "
+                f"with-trend short into the close."
+            )
+            exit_strategy["p0_2_forced"] = True
+
+        # ---- C2: REVERSAL-AWARE EXIT DOWNGRADE (P0-2: gated to mean-reverting regimes) ----
         # If the reversal score is high and the position is in the WARNING zone
         # (not gamma trap or strike-breached), the adverse move is likely exhausted.
-        # Downgrade aggressive CLOSE signals to HOLD_WITH_TRIGGER.
-        if (reversal_score >= 50
+        # Downgrade aggressive CLOSE signals to HOLD_WITH_TRIGGER -- but ONLY in a
+        # mean-reverting (positive-GEX) regime. In a trend-continuation regime the
+        # downgrade is exactly the 5/13 trap, so it is suppressed.
+        if (mean_reverting
+                and reversal_score >= 50
                 and moat > GAMMA_TRAP_THRESHOLD
                 and exit_strategy["action"] in ("CLOSE_SOON", "CLOSE_NOW")
                 and moat <= WARNING_ZONE_THRESHOLD):
@@ -1639,6 +2130,15 @@ def evaluate_positions(db_positions, spx_price: float, db_session,
         # ---- CUMULATIVE DRIFT CHECK ----
         drift_alert = compute_drift_toward_strike(pos.strike, pos.type)
 
+        # ---- P0-3: PER-POSITION ACCOUNT-RISK SIZING ----
+        # The engine is otherwise contract-count-blind; surface $-at-risk vs the cap.
+        _pos_contracts = getattr(pos, "contracts", 1)
+        try:
+            _pos_contracts = max(1, int(_pos_contracts))
+        except (TypeError, ValueError):
+            _pos_contracts = 1   # robust to mocks / None / bad values
+        _pos_risk = calculate_position_risk(_pos_contracts, SPREAD_WIDTH_SPX, pos.credit)
+
         evaluated.append({
             "id": pos.id,
             "type": pos.type,
@@ -1652,12 +2152,18 @@ def evaluate_positions(db_positions, spx_price: float, db_session,
             "at_risk_side": at_risk_side,
             "estimated_pl": estimated_pl,
             "estimated_buyback": estimated_buyback,
+            "estimated_buyback_ask": estimated_buyback_ask,
+            "pricing_source": pricing_source,
             "exit_strategy": exit_strategy,
             "breakeven_event": breakeven_event,
             "drift_alert": drift_alert,
             "premium_trend": premium_trend,
             "reversal_score": reversal_score,
             "reversal_reasons": reversal_reasons,
+            "mean_reverting": mean_reverting,
+            "trend_continuation": trend_continuation,
+            "contracts": _pos_contracts,
+            "position_risk": _pos_risk,
         })
 
     return evaluated
@@ -1902,6 +2408,20 @@ def generate_recommendations(evaluated_positions: list, spx_price: float,
                     f"Close to lock ${credit - est_buyback:.2f}/contract profit. "
                     f"({tp_note})"
                 ),
+            })
+        elif profit_pct >= 50 and moat <= WARNING_ZONE_THRESHOLD and moat > GAMMA_TRAP_THRESHOLD:
+            # Warning zone BUT profitable — prioritize locking gains over danger framing
+            recs.append({
+                "priority": "HIGH",
+                "category": "CLOSE",
+                "target_id": pos["id"],
+                "message": (
+                    f"TAKE PROFIT: {pos['type']} {pos['strike']} at ~{profit_pct:.0f}% gain "
+                    f"while in warning zone (moat {moat:.0f} pts). "
+                    f"Close at ~${est_buyback:.2f} to lock ${credit - est_buyback:.2f}/contract. "
+                    f"Don't let a winner become a loser."
+                ),
+                "confidence": 0.9,
             })
         elif profit_pct >= 50 and moat >= effective_moat_min and hours < 2.0:
             recs.append({
@@ -2358,9 +2878,9 @@ def analyze_trade_proposal(
 
     # ---- 3. DIRECTIONAL ALIGNMENT (0-15 pts) ----
     at_risk_side = False
-    if trade_type == "Put Spread" and directional_bias in ("BEARISH", "LEAN BEARISH"):
+    if trade_type == "Put Spread" and "BEARISH" in directional_bias:
         at_risk_side = True
-    elif trade_type == "Call Spread" and directional_bias in ("BULLISH", "LEAN BULLISH"):
+    elif trade_type == "Call Spread" and "BULLISH" in directional_bias:
         at_risk_side = True
 
     if directional_bias == "NEUTRAL":
@@ -2557,13 +3077,22 @@ def auto_propose_positions(
     momentum_label: str = "",
     vwap_dev: float = 0.0,
     gex_data: dict = None,
+    surge_data: dict = None,
+    live_quotes: dict = None,
+    quote_source: str = "SPY",
+    spx_spy_ratio: float = 10.0,
 ) -> list:
     """
     Auto-proposes new credit spread candidates using analyze_trade_proposal.
     Generates 3 strike candidates per side (put + call) at 1×, 1.25×, 1.5× smart_moat,
     rounds to nearest 5-pt increment, scores each, and returns proposals
     with verdict ACCEPTABLE or better sorted by score.
+
+    When live_quotes is provided, uses real SPXW/SPY bid-ask to compute credit.
+    Falls back to heuristic estimate only if live lookup fails.
     """
+    from data_fetcher import get_spread_buyback_price
+
     hours_remaining = regime_data["time_pressure"]["hours_remaining"]
 
     # Don't propose if < 1 hour left or market closed
@@ -2571,10 +3100,8 @@ def auto_propose_positions(
         return []
 
     proposals = []
-    # Estimated credit based on moat distance (rough model)
-    # Closer strikes = higher premium, farther = lower
+    # Fallback: estimated credit based on moat distance (rough model)
     def estimate_credit(moat_pts: float) -> float:
-        # Rough 0DTE credit model: credit drops exponentially with distance
         base = 0.50 * max(0, 1 - moat_pts / 150) * (1 + hours_remaining / 6.5)
         return round(max(0.10, base), 2)
 
@@ -2587,7 +3114,24 @@ def auto_propose_positions(
                 strike = round((spx_price + offset) / 5) * 5
 
             moat = abs(spx_price - strike)
-            credit = estimate_credit(moat)
+
+            # Try live pricing first, fall back to heuristic
+            credit = None
+            credit_source = "EST"
+            if live_quotes:
+                price_data = get_spread_buyback_price(
+                    live_quotes, side, strike,
+                    spx_spy_ratio=spx_spy_ratio,
+                    spread_width_spx=5.0,
+                    quote_source=quote_source,
+                )
+                if price_data and price_data.get("spread_mid", 0) > 0:
+                    credit = price_data["spread_mid"]
+                    credit_source = price_data.get("pricing_source", quote_source)
+
+            if credit is None:
+                credit = estimate_credit(moat)
+                credit_source = "EST"
 
             # Skip if premium too low to be worth it
             if credit < 0.15:
@@ -2610,17 +3154,32 @@ def auto_propose_positions(
                     gex_data=gex_data,
                 )
 
-                if result["verdict"] in ("STRONG_ENTRY", "ACCEPTABLE"):
-                    proposals.append({
+                # Phase 6I: Penalize fade trades during TREND_SURGE
+                surge_penalty = 0
+                if surge_data and surge_data.get("surge_type") == "TREND_SURGE":
+                    surge_dir = surge_data.get("surge_direction", "NEUTRAL")
+                    fading = (surge_dir == "BULLISH" and side == "Call Spread") or \
+                             (surge_dir == "BEARISH" and side == "Put Spread")
+                    if fading:
+                        fm = surge_data.get("fade_multiplier", 0.0)
+                        surge_penalty = round(15 * fm)  # up to -15 pts
+
+                adjusted_score = result["score"] - surge_penalty
+                if result["verdict"] in ("STRONG_ENTRY", "ACCEPTABLE") and adjusted_score > 40:
+                    proposal = {
                         "type": side,
                         "strike": strike,
                         "estimated_credit": credit,
+                        "credit_source": credit_source,
                         "moat": round(moat, 1),
-                        "score": result["score"],
+                        "score": adjusted_score,
                         "verdict": result["verdict"],
                         "reasons_for": result["reasons_for"][:2],
                         "reasons_against": result["reasons_against"][:1],
-                    })
+                    }
+                    if surge_penalty > 0:
+                        proposal["reasons_against"] = [f"TREND_SURGE: fading {surge_dir} (-{surge_penalty}pts)"] + proposal["reasons_against"]
+                    proposals.append(proposal)
             except Exception as e:
                 logger.warning(f"Auto-propose failed for {side} @ {strike}: {e}")
                 continue
@@ -2740,7 +3299,10 @@ def generate_market_insights(
 
     if expected_move_data and expected_move_data.get("move_consumed_pct", 0) > 0.5:
         pct = expected_move_data["move_consumed_pct"]
-        context_parts.append(f"SPX has already used {pct:.1f}x of today's expected move — further extension unlikely")
+        if er >= 0.40 and regime_state and "STATE A" in regime_state:
+            context_parts.append(f"SPX has used {pct:.1f}x of expected move but strong trend (ER {er:.2f}) could extend further")
+        else:
+            context_parts.append(f"SPX has already used {pct:.1f}x of today's expected move — further extension unlikely")
 
     if context_parts:
         story_parts.append("Key factors: " + ", ".join(context_parts) + ".")
@@ -2763,7 +3325,10 @@ def generate_market_insights(
             light = "RED"
             verdict = "Danger — strike is very close"
         elif moat <= WARNING_ZONE_THRESHOLD:
-            if reversal >= 50:
+            if profit_pct >= 50:
+                light = "YELLOW"
+                verdict = f"~{profit_pct:.0f}% profit in warning zone — take profit"
+            elif reversal >= 50:
                 light = "YELLOW"
                 verdict = f"Under pressure but reversal likely ({reversal}/100)"
             else:
@@ -2790,7 +3355,9 @@ def generate_market_insights(
 
         # Action
         action = "Hold"
-        if exit_action == "LET_EXPIRE":
+        if exit_action == "TAKE_PROFIT":
+            action = f"Take profit at ~${est_buyback:.2f}"
+        elif exit_action == "LET_EXPIRE":
             action = "Let expire"
         elif exit_action == "CLOSE_NOW":
             action = "Close now"
@@ -2855,6 +3422,7 @@ def generate_market_insights(
             "action": action,
             "moat": round(moat, 1),
             "profit_pct": round(profit_pct, 0),
+            "pricing_source": pos.get("pricing_source", "EST"),
             "reversal_score": reversal,
             "heat_score": _compute_heat_score(pos, regime_data, gex_data),
             "context": context,

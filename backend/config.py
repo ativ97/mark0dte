@@ -112,5 +112,20 @@ MARKET_CLOSE_HOUR_ET = 16       # 4:00 PM Eastern
 GAMMA_ACCELERATION_HOUR_ET = 14  # 2:00 PM Eastern — gamma ramp begins
 FINAL_HOUR_MOAT_MULTIPLIER = 1.5 # In final 2 hours, recommended moat is multiplied by this
 
+# --- SPREAD WIDTH ---
+SPREAD_WIDTH_SPX = 5.0  # Always $5 wide SPX spreads
+
+# --- POSITION SIZING GUARDRAIL (P0-3; % of account, 2-tier; revised 2026-05-29) ---
+# Max loss on a $5-wide credit spread = (width - credit) * 100 * contracts.
+# Tiers are a % of ACCOUNT_SIZE so they scale as the account grows.
+# >>> CONFIRM ACCOUNT_SIZE + the two % to your real numbers (placeholders below). <<<
+ACCOUNT_SIZE = 15000.0            # USD (Ativ, 2026-05-29)
+MAX_RISK_WARN_PCT = 0.25          # amber INFORMATIONAL notice: single-trade max loss above this % of account
+MAX_RISK_PER_TRADE_PCT = 0.50     # reference line only
+SIZING_HARD_BLOCK = False         # Ativ choice 2026-05-29: guardrail is INFORMATIONAL — never hard-block / never label "over limit"
+MAX_RISK_WARN = ACCOUNT_SIZE * MAX_RISK_WARN_PCT            # = $3,750 (amber notice)
+MAX_RISK_PER_TRADE = ACCOUNT_SIZE * MAX_RISK_PER_TRADE_PCT  # = $7,500 (reference only)
+MAX_RISK_PER_DAY_PCT = 0.30       # suggested daily stop (cumulative realized loss); guidance only, not enforced
+
 # --- VALID POSITION TYPES ---
 VALID_POSITION_TYPES = ["Put Spread", "Call Spread", "Iron Condor"]

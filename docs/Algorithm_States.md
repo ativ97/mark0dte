@@ -1,6 +1,6 @@
 # 0DTE Algorithmic Decision Support System
 
-**System Architecture & State Rules - Version 5.6**
+**System Architecture & State Rules - Version 5.7**
 
 ## 1. Core Philosophy
 
@@ -323,6 +323,13 @@ The escalation level is included in exit strategy output and displayed as a colo
 State is cleared per-position on close and globally on market close via `clear_rec_state()`.
 
 ## 21. System Modification Log
+
+* **[V5.7] P0-2 Regime-Conditional EJECT + Sizing Guardrail (2026-05-29):**
+  - **P0-2:** `evaluate_positions()` computes `mean_reverting` (positive GEX + no surge) vs `trend_continuation`. (a) Outside a mean-reverting regime, the user-facing action is forced to the escalation level when escalation is URGENT/CRITICAL and the action is a `HOLD_*` (fixes the final-hour action/escalation desync — the 5/13 trap; sets `p0_2_forced`). (b) The C2 reversal-downgrade is now gated to `mean_reverting` only (no longer softens a close in a trend-continuation regime). New position fields: `mean_reverting`, `trend_continuation`.
+  - **Validation:** `backend/synthetic_replay.py` drives `evaluate_positions` bar-by-bar with an injected bar-time clock. **GR-0513** (5/13 trend-through) forces a non-downgradable exit ~14 pts before breach; **GR-0529** (5/29 positive-GEX bounce, +$1,255 live) is NOT force-closed; calm-day guard clean.
+  - **P0-3 (partial):** `config.ACCOUNT_SIZE`/`MAX_RISK_PER_TRADE` ($2,000) + `engine.calculate_position_risk()`. Engine still contract-count-blind — wiring is P0-3a.
+  - 77 tests (51 `test_engine.py` + 26 `test_positions.py`), all passing.
+  - Driven by a full-codebase audit + a live trading session — see docs/IMPLEMENTATION_PLAN.md, docs/VALIDATION_PLAN.md, docs/MONDAY_PREP.md, docs/trading_log_2026-05-29.md.
 
 * **[V5.6] Phase 16 — Algo Intelligence (C1-C4):**
   - C1: Conditional expected move — `compute_expected_move()` discounts remaining σ by move already consumed from open. >0.3σ consumed triggers discount (floor 0.40×).

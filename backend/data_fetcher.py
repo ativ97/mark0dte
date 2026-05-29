@@ -1,4 +1,5 @@
 import math
+import threading
 import pandas as pd
 import requests
 import yfinance as yf
@@ -11,7 +12,7 @@ _spx_cache = {"price": None, "fetched_at": None}
 SPX_CACHE_TTL_SECONDS = 60  # Re-fetch from Yahoo at most once per minute
 
 # --- SPX DAY RANGE CACHE ---
-_spx_range_cache = {"day_high": None, "day_low": None, "day_open": None, "fetched_at": None}
+_spx_range_cache = {"day_high": None, "day_low": None, "day_open": None, "prev_close": None, "fetched_at": None}
 SPX_RANGE_CACHE_TTL_SECONDS = 30  # Day high/low can change fast
 
 # --- VIX CACHE ---
@@ -82,6 +83,7 @@ def fetch_spx_day_range(spy_day_high: float = None, spy_day_low: float = None,
             "day_high_spx": _spx_range_cache["day_high"],
             "day_low_spx": _spx_range_cache["day_low"],
             "day_open_spx": _spx_range_cache["day_open"],
+            "prev_close_spx": _spx_range_cache["prev_close"],
             "source": "Yahoo ^GSPC (cached)",
         }
 
@@ -92,16 +94,19 @@ def fetch_spx_day_range(spy_day_high: float = None, spy_day_low: float = None,
         day_high = info.get("dayHigh") or info.get("day_high")
         day_low = info.get("dayLow") or info.get("day_low")
         day_open = info.get("open") or info.get("regularMarketOpen")
+        prev_close = info.get("previousClose") or info.get("previous_close")
         if day_high and day_low and day_high > 0 and day_low > 0:
             _spx_range_cache["day_high"] = round(float(day_high), 2)
             _spx_range_cache["day_low"] = round(float(day_low), 2)
             _spx_range_cache["day_open"] = round(float(day_open), 2) if day_open and day_open > 0 else None
+            _spx_range_cache["prev_close"] = round(float(prev_close), 2) if prev_close and prev_close > 0 else None
             _spx_range_cache["fetched_at"] = now
-            logger.info(f"Fetched SPX day range from Yahoo: High={day_high:.2f}, Low={day_low:.2f}, Open={day_open}")
+            logger.info(f"Fetched SPX day range from Yahoo: High={day_high:.2f}, Low={day_low:.2f}, Open={day_open}, PrevClose={prev_close}")
             return {
                 "day_high_spx": _spx_range_cache["day_high"],
                 "day_low_spx": _spx_range_cache["day_low"],
                 "day_open_spx": _spx_range_cache["day_open"],
+                "prev_close_spx": _spx_range_cache["prev_close"],
                 "source": "Yahoo ^GSPC (live)",
             }
         else:
@@ -118,6 +123,7 @@ def fetch_spx_day_range(spy_day_high: float = None, spy_day_low: float = None,
             "day_high_spx": fallback_high,
             "day_low_spx": fallback_low,
             "day_open_spx": None,
+            "prev_close_spx": None,
             "source": "SPY ratio fallback",
         }
 
@@ -128,10 +134,11 @@ def fetch_spx_day_range(spy_day_high: float = None, spy_day_low: float = None,
             "day_high_spx": _spx_range_cache["day_high"],
             "day_low_spx": _spx_range_cache["day_low"],
             "day_open_spx": _spx_range_cache["day_open"],
+            "prev_close_spx": _spx_range_cache["prev_close"],
             "source": "Yahoo ^GSPC (stale cache)",
         }
 
-    return {"day_high_spx": None, "day_low_spx": None, "day_open_spx": None, "source": "unavailable"}
+    return {"day_high_spx": None, "day_low_spx": None, "day_open_spx": None, "prev_close_spx": None, "source": "unavailable"}
 
 
 def fetch_vix_data() -> dict:
@@ -178,6 +185,7 @@ def fetch_vix_data() -> dict:
         logger.warning(f"VIX9D fetch failed: {e}")
 
     # Cache results
+    vix_is_stale = False
     if vix_val is not None:
         _vix_cache["vix"] = vix_val
         _vix_cache["vix9d"] = vix9d_val
@@ -187,12 +195,13 @@ def fetch_vix_data() -> dict:
     if vix_val is None and _vix_cache["vix"] is not None:
         vix_val = _vix_cache["vix"]
         vix9d_val = _vix_cache["vix9d"]
+        vix_is_stale = True   # P0-5 fix: do NOT report a stale cache value as "live"
         logger.warning(f"Using stale VIX cache: {vix_val}")
 
     return {
         "vix": vix_val,
         "vix9d": vix9d_val,
-        "source": "live" if vix_val is not None else "unavailable",
+        "source": ("stale_cache" if vix_is_stale else "live") if vix_val is not None else "unavailable",
     }
 
 
@@ -438,14 +447,20 @@ def fetch_alpaca_market_data(symbol: str = "SPY"):
 # GEX (Gamma Exposure) Engine — ThetaData Integration
 # ============================================================
 
-# --- THETADATA CLIENT SINGLETON ---
+# --- THETADATA CLIENT SINGLETON (thread-safe) ---
 _theta_client = None
+_theta_lock = threading.Lock()
 
 
 def _get_theta_client():
     """Lazy singleton for ThetaData client to avoid repeated auth."""
     global _theta_client
-    if _theta_client is None:
+    if _theta_client is not None:
+        return _theta_client
+    with _theta_lock:
+        # Double-check after acquiring lock
+        if _theta_client is not None:
+            return _theta_client
         if not THETA_EMAIL or not THETA_PASSWORD:
             return None
         try:
@@ -756,6 +771,254 @@ def fetch_historical_gex(trade_date: str, spy_price: float = None, spx_spy_ratio
     except Exception as e:
         logger.debug(f"Historical GEX fetch failed for {trade_date}: {e}")
         return None
+
+
+# ============================================================
+# PHASE 7+9: Live Spread Quotes — ThetaData Bid/Ask
+# Phase 9E: Try SPXW (direct SPX options) first, fall back to SPY proxy
+# ============================================================
+
+_quote_cache = {"data": None, "fetched_at": None, "source": None}
+QUOTE_CACHE_TTL_SECONDS = 30  # 30s cache for live quotes
+
+
+def fetch_live_option_quotes() -> dict | None:
+    """
+    Fetches live bid/ask for 0DTE options chain from ThetaData.
+    Tries SPXW (direct SPX options) first for exact pricing.
+    Falls back to SPY if SPXW unavailable.
+
+    Returns a dict with:
+      "quotes": {(strike, right) → {"bid", "ask", "mid"}}
+      "source": "SPXW" or "SPY"
+    Cached for 30 seconds.
+    """
+    global _quote_cache
+    now = datetime.now(timezone.utc)
+
+    if (_quote_cache["data"] is not None
+            and _quote_cache["fetched_at"] is not None
+            and (now - _quote_cache["fetched_at"]).total_seconds() < QUOTE_CACHE_TTL_SECONDS):
+        return _quote_cache["data"]
+
+    client = _get_theta_client()
+    if client is None:
+        logger.warning("ThetaData client unavailable — live quotes skipped")
+        return None
+
+    today = date.today()
+    exp_str = today.strftime("%Y%m%d")
+
+    # Phase 9F: Try SPY first (proven reliable, backwards-compatible)
+    spy_result = _fetch_quotes_for_root(client, "SPY", exp_str)
+
+    # Phase 9E: Then try SPXW upgrade (direct SPX options — exact pricing)
+    # Only attempt SPXW if SPY succeeded (proves client is working)
+    spxw_result = None
+    if spy_result is not None:
+        spxw_result = _fetch_quotes_for_root(client, "SPXW", exp_str)
+
+    # Prefer SPXW if available, otherwise use SPY
+    if spxw_result is not None:
+        _quote_cache["data"] = {"quotes": spxw_result, "source": "SPXW"}
+        _quote_cache["fetched_at"] = now
+        logger.info(f"SPXW quotes fetched: {len(spxw_result)} contracts (direct SPX pricing)")
+        return _quote_cache["data"]
+
+    if spy_result is not None:
+        _quote_cache["data"] = {"quotes": spy_result, "source": "SPY"}
+        _quote_cache["fetched_at"] = now
+        logger.info(f"SPY quotes fetched: {len(spy_result)} contracts (proxy mode)")
+        return _quote_cache["data"]
+
+    logger.warning("Live quote fetch failed (SPY and SPXW both unavailable)")
+    return None
+
+
+def _fetch_quotes_for_root(client, root: str, exp_str: str) -> dict | None:
+    """Fetch option quotes for a given root symbol. Returns quotes dict or None."""
+    try:
+        quote_df = client.option_snapshot_quote(
+            root, expiration=exp_str, strike="*", right="both"
+        )
+        if quote_df is None or len(quote_df) == 0:
+            logger.debug(f"ThetaData returned empty quotes for {root}")
+            return None
+
+        pdf = quote_df.to_pandas()
+        quotes = {}
+        for _, row in pdf.iterrows():
+            strike = float(row["strike"])
+            right = str(row["right"]).upper()
+            bid = float(row["bid"]) if row["bid"] > 0 else 0.0
+            ask = float(row["ask"]) if row["ask"] > 0 else 0.0
+            mid = round((bid + ask) / 2, 3) if (bid > 0 and ask > 0) else 0.0
+            quotes[(strike, right)] = {"bid": bid, "ask": ask, "mid": mid}
+
+        if len(quotes) < 5:
+            logger.debug(f"{root} returned only {len(quotes)} quotes — too few, skipping")
+            return None
+
+        return quotes
+
+    except Exception as e:
+        logger.debug(f"{root} quote fetch failed: {e}")
+        return None
+
+
+def get_spread_buyback_price(
+    quotes: dict,
+    position_type: str,
+    short_strike_spx: float,
+    spx_spy_ratio: float = 10.0,
+    spread_width_spx: float = 5.0,
+    quote_source: str = "SPY",
+) -> dict | None:
+    """
+    Given the live quotes dict and a position, compute the spread's mid-price buyback cost.
+
+    Two modes based on quote_source:
+      "SPXW": Quotes are already in SPX strikes — look up directly, no conversion.
+      "SPY":  Convert SPX strikes to SPY, compute SPY spread mid, scale by width_ratio.
+
+    Returns dict with: short_mid, long_mid, spread_mid, bid_ask_spread, pricing_source
+    Returns None if quotes unavailable for either leg.
+    """
+    if not quotes:
+        return None
+
+    if "Put" in position_type:
+        short_right = "PUT"
+        long_strike_spx = short_strike_spx - spread_width_spx
+    else:
+        short_right = "CALL"
+        long_strike_spx = short_strike_spx + spread_width_spx
+
+    if quote_source == "SPXW":
+        # SPXW: Direct SPX strikes — no conversion needed
+        return _lookup_spread_direct(
+            quotes, short_right, short_strike_spx, long_strike_spx, spread_width_spx
+        )
+    else:
+        # SPY proxy: Convert, scale by width_ratio
+        return _lookup_spread_spy_proxy(
+            quotes, short_right, position_type,
+            short_strike_spx, long_strike_spx, spx_spy_ratio, spread_width_spx,
+        )
+
+
+def _lookup_spread_direct(quotes, right, short_strike, long_strike, spread_width):
+    """SPXW mode: Look up SPX strikes directly from SPXW quotes."""
+    short_key = (short_strike, right)
+    long_key = (long_strike, right)
+
+    short_quote = quotes.get(short_key)
+    long_quote = quotes.get(long_key)
+
+    # Try ±5 rounding (SPXW has $5 intervals)
+    if not short_quote or short_quote["mid"] <= 0:
+        for adj in [-5.0, 5.0]:
+            alt_key = (short_strike + adj, right)
+            if quotes.get(alt_key) and quotes[alt_key]["mid"] > 0:
+                short_quote = quotes[alt_key]
+                short_strike = short_strike + adj
+                long_key = (short_strike + spread_width if right == "CALL" else short_strike - spread_width, right)
+                long_quote = quotes.get(long_key)
+                break
+        if not short_quote or short_quote["mid"] <= 0:
+            return None
+
+    short_mid = short_quote["mid"]
+    long_mid = long_quote["mid"] if long_quote and long_quote["mid"] > 0 else 0.0
+    spread_mid = round(max(0.01, short_mid - long_mid), 2)
+    short_ba = round(short_quote["ask"] - short_quote["bid"], 2) if short_quote["ask"] > 0 else 0.0
+
+    # P1-5: realistic cost to CLOSE = buy the short leg at its ASK, sell the long leg at its BID
+    # (you pay up vs the mid). This is what the broker actually fills, so it's the honest stop/P&L input.
+    short_ask = short_quote.get("ask") or short_mid
+    long_bid = (long_quote.get("bid") if long_quote else 0.0) or 0.0
+    spread_ask_close = round(max(0.01, short_ask - long_bid), 2)
+
+    logger.debug(f"SPXW direct: {short_strike}/{long_strike} ({right}), "
+                 f"short_mid={short_mid:.3f}, long_mid={long_mid:.3f}, spread={spread_mid:.2f}, ask_close={spread_ask_close:.2f}")
+
+    return {
+        "short_mid": round(short_mid, 3),
+        "long_mid": round(long_mid, 3),
+        "spread_mid": spread_mid,
+        "spread_ask_close": spread_ask_close,
+        "width_ratio": 1.0,
+        "bid_ask_spread": short_ba,
+        "short_strike_spy": short_strike,
+        "long_strike_spy": long_strike,
+        "pricing_source": "SPXW",
+    }
+
+
+def _lookup_spread_spy_proxy(quotes, right, position_type,
+                              short_strike_spx, long_strike_spx,
+                              spx_spy_ratio, spread_width_spx):
+    """SPY proxy mode: Convert SPX→SPY, compute spread, scale by width_ratio."""
+    short_strike_spy = round(short_strike_spx / spx_spy_ratio, 0)
+    long_strike_spy = round(long_strike_spx / spx_spy_ratio, 0)
+
+    spy_width = abs(short_strike_spy - long_strike_spy)
+    if spy_width < 1.0:
+        if "Put" in position_type:
+            long_strike_spy = short_strike_spy - 1.0
+        else:
+            long_strike_spy = short_strike_spy + 1.0
+        spy_width = 1.0
+
+    short_key = (short_strike_spy, right)
+    long_key = (long_strike_spy, right)
+
+    short_quote = quotes.get(short_key)
+    long_quote = quotes.get(long_key)
+
+    if not short_quote or short_quote["mid"] <= 0:
+        for adj in [-1.0, 1.0]:
+            alt_key = (short_strike_spy + adj, right)
+            if quotes.get(alt_key) and quotes[alt_key]["mid"] > 0:
+                short_quote = quotes[alt_key]
+                short_strike_spy = short_strike_spy + adj
+                spy_width = abs(short_strike_spy - long_strike_spy)
+                if spy_width < 1.0:
+                    spy_width = 1.0
+                break
+        if not short_quote or short_quote["mid"] <= 0:
+            return None
+
+    short_mid = short_quote["mid"]
+    long_mid = long_quote["mid"] if long_quote and long_quote["mid"] > 0 else 0.0
+
+    spy_spread_mid = max(0.001, short_mid - long_mid)
+    width_ratio = spread_width_spx / spy_width
+    spread_mid = round(max(0.01, spy_spread_mid * width_ratio), 2)
+
+    short_ba = round(short_quote["ask"] - short_quote["bid"], 2) if short_quote["ask"] > 0 else 0.0
+
+    # P1-5: realistic cost to close (buy short@ask, sell long@bid), scaled to the SPX width.
+    short_ask = short_quote.get("ask") or short_mid
+    long_bid = (long_quote.get("bid") if long_quote else 0.0) or 0.0
+    spy_spread_ask = max(0.001, short_ask - long_bid)
+    spread_ask_close = round(max(0.01, spy_spread_ask * width_ratio), 2)
+
+    logger.debug(f"SPY proxy: SPX {short_strike_spx}/{long_strike_spx} → SPY {short_strike_spy}/{long_strike_spy} "
+                 f"({right}), spy_mid={spy_spread_mid:.3f}, ×{width_ratio:.1f} = {spread_mid:.2f}, ask_close={spread_ask_close:.2f}")
+
+    return {
+        "short_mid": round(short_mid, 3),
+        "long_mid": round(long_mid, 3),
+        "spy_spread_mid": round(spy_spread_mid, 3),
+        "spread_mid": spread_mid,
+        "spread_ask_close": spread_ask_close,
+        "width_ratio": width_ratio,
+        "bid_ask_spread": short_ba,
+        "short_strike_spy": short_strike_spy,
+        "long_strike_spy": long_strike_spy,
+        "pricing_source": "LIVE",
+    }
 
 
 def get_spx_spy_ratio(spy_price: float = None) -> dict:
