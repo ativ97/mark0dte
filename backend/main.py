@@ -13,16 +13,24 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 logger = logging.getLogger("0DTE-QuantEngine")
 
 # Import refactored modules
-from data_fetcher import fetch_alpaca_market_data, fetch_spx_live_price, fetch_spx_day_range, fetch_vix_data, compute_expected_move, fetch_gex_data, fetch_realized_move_distribution
-from engine import analyze_market_regime, evaluate_positions, generate_recommendations, compute_watch_levels, compute_position_summary, compute_smart_moat, analyze_trade_proposal, clear_rec_state, auto_propose_positions, generate_market_insights
+from data_fetcher import fetch_alpaca_market_data, fetch_spx_live_price, fetch_spx_day_range, fetch_vix_data, compute_expected_move, fetch_gex_data, fetch_realized_move_distribution, fetch_live_option_quotes
+from engine import analyze_market_regime, evaluate_positions, generate_recommendations, compute_watch_levels, compute_position_summary, compute_smart_moat, calculate_portfolio_heat, detect_surge, compute_initial_balance, detect_gap_rejection, detect_post_event_shift, analyze_trade_proposal, clear_rec_state, auto_propose_positions, generate_market_insights, stabilize_gex_regime, mean_reversion_status, compute_rsi_50_price, compute_magnet_forces
 from database import Base, engine as db_engine, get_db, PositionDB, ClosedPositionDB
-from accuracy_tracker import log_recommendation, resolve_position, clear_position_state, get_accuracy_stats, get_signal_log
+from accuracy_tracker import track_signal, resolve_position, resolve_expired_positions, clear_position_state, get_accuracy_stats, get_signal_log
 
 # Initialize Database tables
 Base.metadata.create_all(bind=db_engine)
 
 # --- TELEMETRY RING BUFFER (in-memory, stores last 5 snapshots for trend deltas) ---
 _telemetry_snapshots: deque = deque(maxlen=5)
+
+# --- PHASE 9: BUYBACK HISTORY (per-position premium velocity tracker) ---
+# Stores last 10 buyback prices per position_id for velocity computation
+_buyback_history: dict[int, deque] = {}  # position_id → deque of {timestamp, price, source}
+BUYBACK_HISTORY_MAXLEN = 10
+
+# --- GEX REGIME HYSTERESIS (2026-06-01): last STRONG regime sign, for the deadband ---
+_gex_regime_prev: str | None = None
 
 app = FastAPI(title="0DTE Quant Engine V3.0")
 
@@ -40,6 +48,14 @@ class PositionCreate(BaseModel):
     type: Literal["Put Spread", "Call Spread", "Iron Condor"]
     strike: float
     credit: float
+    contracts: int = 1   # P0-3: position size for account-risk sizing
+
+    @field_validator("contracts")
+    @classmethod
+    def contracts_must_be_positive(cls, v):
+        if v < 1:
+            raise ValueError("Contracts must be >= 1")
+        return v
 
     @field_validator("strike")
     @classmethod
@@ -69,7 +85,18 @@ class EvaluatedPosition(BaseModel):
     at_risk_side: bool = False
     estimated_pl: float = 0.0
     estimated_buyback: float = 0.0
+    estimated_buyback_ask: float = 0.0   # P1-5: realistic ask-side close cost
+    pricing_source: str = "EST"
+    buyback_velocity: float = 0.0
+    buyback_trend: str = "NEW"
+    buyback_samples: int = 0
     exit_strategy: dict = {}
+    # P0-2 / P0-3 (added 2026-05-29): regime gate + account-risk sizing surfaced to the API
+    mean_reverting: bool = False
+    trend_continuation: bool = False
+    reversal_score: float = 0.0
+    contracts: int = 1
+    position_risk: dict = {}
 
 
 class SubScores(BaseModel):
@@ -93,6 +120,7 @@ class MarketEvents(BaseModel):
     moat_multiplier: float
     risk_level: str
     day_of_week: str
+    event_time_et: float | None = None
 
 
 class TimePressure(BaseModel):
@@ -160,6 +188,7 @@ class SmartMoat(BaseModel):
     combined_factor: float
     move_consumed_factor: float = 1.0
     move_consumed_pct: float = 0.0
+    move_consumed_blocked: bool = False
 
 
 class RegimeTransition(BaseModel):
@@ -182,6 +211,7 @@ class GexLevel(BaseModel):
 class GexData(BaseModel):
     net_gex: float = 0
     gex_regime: str = "UNAVAILABLE"
+    gex_regime_raw: str | None = None  # 2026-06-01: raw sign before hysteresis (vs stabilized gex_regime)
     gex_regime_label: str = "GEX data unavailable"
     gamma_wall_spy: float = 0
     gamma_wall_spx: float = 0
@@ -239,6 +269,7 @@ class InsightPositionCard(BaseModel):
     action: str
     moat: float
     profit_pct: float = 0
+    pricing_source: str = "EST"
     reversal_score: int = 0
     heat_score: int = 0
     context: str = ""
@@ -304,6 +335,14 @@ class TelemetryResponse(BaseModel):
     trade_proposals: list | None = None
     accuracy_stats: dict | None = None
     market_insights: MarketInsights | None = None
+    portfolio_heat: dict | None = None
+    mean_reversion: dict | None = None
+    rsi_50_price: float | None = None
+    magnet_forces: dict | None = None
+    surge_data: dict | None = None
+    ib_data: dict | None = None
+    gap_rejection: dict | None = None
+    post_event_shift: dict | None = None
     previous_snapshot: dict | None = None
 
 
@@ -312,7 +351,7 @@ class TelemetryResponse(BaseModel):
 @app.post("/api/positions")
 def create_position(pos: PositionCreate, db: Session = Depends(get_db)):
     """Saves a new contract to the SQLite memory."""
-    new_pos = PositionDB(type=pos.type, strike=pos.strike, credit=pos.credit)
+    new_pos = PositionDB(type=pos.type, strike=pos.strike, credit=pos.credit, contracts=pos.contracts)
     db.add(new_pos)
     db.commit()
     db.refresh(new_pos)
@@ -404,8 +443,29 @@ def get_telemetry(db: Session = Depends(get_db)):
     day_high_spx = spx_range["day_high_spx"] or round(momentum_data["day_high_spy"] * spx_spy_ratio, 2)
     day_low_spx = spx_range["day_low_spx"] or round(momentum_data["day_low_spy"] * spx_spy_ratio, 2)
     day_open_spx = spx_range.get("day_open_spx")
+    prev_close_spx = spx_range.get("prev_close_spx")
     range_position = momentum_data["range_position"]
-    logger.info(f"SPX Day Range: High={day_high_spx}, Low={day_low_spx}, Open={day_open_spx} (source: {spx_range['source']})")
+    logger.info(f"SPX Day Range: High={day_high_spx}, Low={day_low_spx}, Open={day_open_spx}, PrevClose={prev_close_spx} (source: {spx_range['source']})")
+
+    # Phase 6: Surge detection — rolling 20-min price change from ring buffer
+    hours_remaining_pre = regime_data["time_pressure"]["hours_remaining"]
+    surge_data = detect_surge(
+        spx_price, list(_telemetry_snapshots), regime_data["er_value"],
+        hours_remaining=hours_remaining_pre,
+    )
+    if surge_data["surge_type"] != "NONE":
+        logger.warning(f"SURGE DETECTED: {surge_data['surge_type']} — {surge_data['message']}")
+
+    # Phase 6: Initial Balance (30-min IB high/low) + Gap %
+    ib_data = compute_initial_balance(
+        df, day_open_spx=day_open_spx, prev_close_spx=prev_close_spx,
+        spx_spy_ratio=spx_spy_ratio,
+    )
+
+    # Phase 6: Gap rejection detection ("Gap & Crap")
+    gap_rejection = detect_gap_rejection(spx_price, ib_data)
+    if gap_rejection["rejected"]:
+        logger.warning(f"GAP REJECTION: {gap_rejection['message']}")
 
     # Phase 7: Fetch VIX data for expected move calculation
     vix_data = fetch_vix_data()
@@ -430,7 +490,16 @@ def get_telemetry(db: Session = Depends(get_db)):
         gex_raw = fetch_gex_data(spy_price=live_price, spx_spy_ratio=spx_spy_ratio)
         if gex_raw and gex_raw.get("gex_regime") != "UNAVAILABLE":
             gex_data = gex_raw
-            logger.info(f"GEX: {gex_raw['gex_regime']} — net {gex_raw['net_gex']:,.0f}, "
+            # GEX regime hysteresis (2026-06-01): stabilize the sign so it doesn't whipsaw near
+            # net_gex=0 (which swung the moat 75->104->58->89->77 on 6/1). Everything downstream
+            # (smart moat, P0-2, position messages) reads the stabilized regime.
+            global _gex_regime_prev
+            _stable_regime = stabilize_gex_regime(gex_data.get("net_gex"), _gex_regime_prev)
+            gex_data["gex_regime_raw"] = gex_data.get("gex_regime")
+            gex_data["gex_regime"] = _stable_regime
+            if _stable_regime in ("POSITIVE", "NEGATIVE"):
+                _gex_regime_prev = _stable_regime
+            logger.info(f"GEX: {gex_raw['gex_regime']} (stabilized {_stable_regime}) — net {gex_raw['net_gex']:,.0f}, "
                         f"gamma wall SPX {gex_raw['gamma_wall_spx']}, "
                         f"put wall SPX {gex_raw['put_wall_spx']}")
     except Exception as e:
@@ -444,11 +513,25 @@ def get_telemetry(db: Session = Depends(get_db)):
         gex_data=gex_data,
         expected_move_data=expected_move_data,
         day_open_spx=day_open_spx,
+        surge_data=surge_data,
+        ib_data=ib_data,
     )
     smart_moat = smart_moat_data["smart_moat"]
     logger.info(f"Smart Moat: {smart_moat_data['moat_explanation']}")
 
-    # Run Phase 3.2 Enhanced Position Intelligence with SMART moat + GEX
+    # Phase 7+9: Fetch live bid/ask quotes from ThetaData (tries SPXW then SPY)
+    live_quotes = None
+    quote_source = "SPY"  # default assumption for downstream width_ratio logic
+    try:
+        quote_result = fetch_live_option_quotes()
+        if quote_result:
+            live_quotes = quote_result["quotes"]
+            quote_source = quote_result["source"]
+            logger.info(f"Live quotes: {len(live_quotes)} contracts via {quote_source}")
+    except Exception as e:
+        logger.warning(f"Live quote fetch skipped: {e}")
+
+    # Run Phase 3.2 Enhanced Position Intelligence with SMART moat + GEX + live quotes
     db_positions = db.query(PositionDB).all()
     evaluated_positions = evaluate_positions(
         db_positions, spx_price, db,
@@ -464,21 +547,90 @@ def get_telemetry(db: Session = Depends(get_db)):
         gex_data=gex_data,
         rsi_14=round(df.iloc[-1]['RSI_14'], 2),
         er_value=regime_data["er_value"],
+        surge_data=surge_data,
+        event_moat_multiplier=regime_data["time_pressure"].get("market_events", {}).get("moat_multiplier", 1.0),
+        live_quotes=live_quotes,
+        spx_spy_ratio=spx_spy_ratio,
+        quote_source=quote_source,
     )
 
-    # Log recommendations to accuracy tracker
+    # Portfolio-level concentration risk
+    portfolio_heat = calculate_portfolio_heat(db_positions, directional_bias=regime_data["directional_bias"], evaluated_positions=evaluated_positions)
+
+    # MEAN-REVERSION REGIME read (2026-06-01): is the fade playbook (GEX-wall / RSI-fade /
+    # gap-fade) valid right now, or has the regime that breaks it turned on?
+    mean_reversion = mean_reversion_status(gex_data, regime_data, surge_data)
+
+    # Log signals to outcome tracker (tracks transitions + updates moat/buyback tracking)
+    hours_remaining = regime_data["time_pressure"]["hours_remaining"]
+    if hours_remaining <= 0:
+        # P0-6: market closed — grade every still-open signal by its expiry outcome instead of
+        # emitting an unresolved 'EXPIRED' signal (which used to leak and never grade).
+        resolve_expired_positions(evaluated_positions)
+    else:
+        for ep in evaluated_positions:
+            exit_strat = ep.get("exit_strategy", {})
+            track_signal(
+                pos_id=ep["id"],
+                pos_type=ep["type"],
+                strike=ep["strike"],
+                credit=ep["credit"],
+                action=exit_strat.get("action", "UNKNOWN"),
+                regime_score=regime_data["regime_score"],
+                moat=ep.get("moat", 0),
+                escalation=exit_strat.get("escalation_level"),
+                spx_price=spx_price,
+                buyback=ep.get("estimated_buyback", 0),
+                hours_remaining=hours_remaining,
+                over_limit=(ep.get("position_risk") or {}).get("over_limit", False),
+                trend_continuation=ep.get("trend_continuation", False),
+            )
+
+    # Phase 9: Premium velocity — track buyback price history and compute $/min trend
+    # ONLY track LIVE/SPXW prices — EST model estimates are regime-driven, not market-driven
+    now_ts = datetime.datetime.now(datetime.timezone.utc)
+    active_ids = set()
     for ep in evaluated_positions:
-        exit_strat = ep.get("exit_strategy", {})
-        log_recommendation(
-            pos_id=ep["id"],
-            pos_type=ep["type"],
-            strike=ep["strike"],
-            credit=ep["credit"],
-            action=exit_strat.get("action", "UNKNOWN"),
-            regime_score=regime_data["regime_score"],
-            moat=ep.get("moat", 0),
-            escalation=exit_strat.get("escalation_level"),
-        )
+        pos_id = ep["id"]
+        active_ids.add(pos_id)
+        buyback = ep.get("estimated_buyback", 0.0)
+        source = ep.get("pricing_source", "EST")
+
+        if pos_id not in _buyback_history:
+            _buyback_history[pos_id] = deque(maxlen=BUYBACK_HISTORY_MAXLEN)
+        if source in ("LIVE", "SPXW"):
+            _buyback_history[pos_id].append({"timestamp": now_ts, "price": buyback, "source": source})
+
+        history = _buyback_history[pos_id]
+        if len(history) >= 2:
+            oldest = history[0]
+            newest = history[-1]
+            time_diff_min = (newest["timestamp"] - oldest["timestamp"]).total_seconds() / 60.0
+            if time_diff_min > 0.1:  # at least 6 seconds
+                price_change = newest["price"] - oldest["price"]
+                velocity = round(price_change / time_diff_min, 4)  # $/min
+                if velocity < -0.005:
+                    trend = "FALLING"
+                elif velocity > 0.005:
+                    trend = "RISING"
+                else:
+                    trend = "STABLE"
+                ep["buyback_velocity"] = velocity
+                ep["buyback_trend"] = trend
+                ep["buyback_samples"] = len(history)
+            else:
+                ep["buyback_velocity"] = 0.0
+                ep["buyback_trend"] = "STABLE"
+                ep["buyback_samples"] = len(history)
+        else:
+            ep["buyback_velocity"] = 0.0
+            ep["buyback_trend"] = "NEW"
+            ep["buyback_samples"] = len(history)
+
+    # Prune history for closed positions
+    for stale_id in list(_buyback_history.keys()):
+        if stale_id not in active_ids:
+            del _buyback_history[stale_id]
 
     # Generate actionable recommendations
     # Pass rsi_14 and er_value into regime_data so recommender can reference them
@@ -513,7 +665,7 @@ def get_telemetry(db: Session = Depends(get_db)):
         "open_count": len(evaluated_positions),
     }
 
-    # Phase 15: Auto-propose new positions when moat allows
+    # Phase 15: Auto-propose new positions when moat allows (with live credit pricing)
     trade_proposals = auto_propose_positions(
         spx_price=spx_price,
         regime_data=regime_data,
@@ -525,6 +677,10 @@ def get_telemetry(db: Session = Depends(get_db)):
         momentum_label=regime_data["momentum"]["momentum_label"],
         vwap_dev=regime_data.get("vwap_dev", 0),
         gex_data=gex_data,
+        surge_data=surge_data,
+        live_quotes=live_quotes,
+        quote_source=quote_source,
+        spx_spy_ratio=spx_spy_ratio,
     )
 
     # Phase 2: Generate plain-English market insights for the Insights tab
@@ -539,6 +695,51 @@ def get_telemetry(db: Session = Depends(get_db)):
         day_low_spx=day_low_spx,
         recommendations=recommendations,
     )
+
+    # RSI-50 price (2026-06-01): the SPX level that would neutralize RSI to 50 — a MOVING
+    # mean-reversion target to bracket against the (fixed) gamma magnet. Surfaced as a Key Level.
+    rsi_50_price = None
+    try:
+        _rsi50_spy = compute_rsi_50_price(df['Close'].tolist())
+        if _rsi50_spy is not None:
+            rsi_50_price = round(_rsi50_spy * spx_spy_ratio, 0)
+            if isinstance(market_insights, dict) and rsi_50_price:
+                _side = "below" if rsi_50_price < spx_price else "above"
+                market_insights.setdefault("key_levels", []).append({
+                    "level": rsi_50_price,
+                    "label": "RSI-50 Price (moving)",
+                    "meaning": (f"Where RSI would neutralize to 50 ({_side} spot) — a mean-reversion "
+                                f"target. Recomputes each bar; pair with the gamma wall as the two attractors."),
+                })
+    except Exception as e:
+        logger.warning(f"RSI-50 price computation skipped: {e}")
+
+    # Price Magnet forces (2026-06-01): which pull is strongest today (GEX wall / RSI-50 / trend)
+    # + the predicted magnet level + a distribution-based touch-by-close estimate.
+    magnet_forces = None
+    try:
+        magnet_forces = compute_magnet_forces(
+            spx_price=spx_price, gex_data=gex_data,
+            rsi_14=round(df.iloc[-1]['RSI_14'], 2),
+            regime_data=regime_data, expected_move_data=expected_move_data,
+            rsi_50_spx=rsi_50_price, surge_data=surge_data,
+            hours_remaining=regime_data["time_pressure"]["hours_remaining"],
+        )
+    except Exception as e:
+        logger.warning(f"Magnet-forces computation skipped: {e}")
+
+    # Phase 9H: Post-event regime shift detection
+    market_events = regime_data["time_pressure"].get("market_events", {})
+    post_event_shift = detect_post_event_shift(
+        market_events=market_events,
+        snapshots=list(_telemetry_snapshots),
+        current_spx=spx_price,
+        current_er=regime_data["er_value"],
+        current_rsi=round(df.iloc[-1]['RSI_14'], 2),
+        current_range_pos=range_position,
+    )
+    if post_event_shift:
+        logger.info(f"Post-event: {post_event_shift['shift_type']} — {post_event_shift['message']}")
 
     # --- RING BUFFER: Capture snapshot and compute deltas ---
     current_rsi = round(df.iloc[-1]['RSI_14'], 2)
@@ -582,7 +783,7 @@ def get_telemetry(db: Session = Depends(get_db)):
         regime_score=regime_data["regime_score"],
         continuous_score=regime_data["continuous_score"],
         directional_bias=regime_data["directional_bias"],
-        recommended_moat=regime_data["recommended_moat"],
+        recommended_moat=f"{smart_moat}+ Points (Smart Moat)",
         effective_moat_min=smart_moat,
         stop_loss_rule=regime_data["stop_loss_rule"],
         sub_scores=regime_data["sub_scores"],
@@ -602,6 +803,14 @@ def get_telemetry(db: Session = Depends(get_db)):
         trade_proposals=trade_proposals if trade_proposals else None,
         accuracy_stats=get_accuracy_stats(),
         market_insights=market_insights,
+        portfolio_heat=portfolio_heat,
+        mean_reversion=mean_reversion,
+        rsi_50_price=rsi_50_price,
+        magnet_forces=magnet_forces,
+        surge_data=surge_data,
+        ib_data=ib_data,
+        gap_rejection=gap_rejection if gap_rejection.get("rejected") else None,
+        post_event_shift=post_event_shift,
         previous_snapshot=prev_snapshot,
     )
 

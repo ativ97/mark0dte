@@ -1,6 +1,6 @@
 # 0DTE Algorithmic Decision Support System
 
-**System Architecture & State Rules - Version 5.6**
+**System Architecture & State Rules - Version 5.8**
 
 ## 1. Core Philosophy
 
@@ -323,6 +323,25 @@ The escalation level is included in exit strategy output and displayed as a colo
 State is cleared per-position on close and globally on market close via `clear_rec_state()`.
 
 ## 21. System Modification Log
+
+* **[V5.8] Live checkpoint + 8 post-session fixes (2026-06-01):**
+  - First live run of the V5.7 batch (~+$1,500 realized; docs/trading_log_2026-06-01.md). H1/H2/H4 validated live; **P0-2's force-path was NOT exercised** (a chop / mean-reverting day, no trend-through) — the 5/13 fix remains unproven live, needs a genuine trend day.
+  - **GEX hysteresis:** `stabilize_gex_regime(net_gex, prev, band=GEX_REGIME_BAND)` — ±20M deadband + stickiness, wired in main.py after `fetch_gex_data`. Stops the regime/moat whipsaw (6/1: net GEX flipped ~6× near zero, swinging the recommended moat 75→104→58→89→77 in minutes).
+  - **Side-aware mean-reversion:** positive GEX is protection ONLY when the gamma wall sits between spot and the short strike (floor above a put / ceiling below a call); a short option on the far side of the magnet is dragged toward its strike (the 6/1 7605 call under the 7617 wall) → `mean_reverting=False`, `trend_continuation=True`.
+  - **FADE REGIME read:** `mean_reversion_status()` → telemetry `mean_reversion` {on,label,reason} + frontend badge — an explicit "is the fade playbook (GEX-wall / RSI-fade / gap-fade) valid now?" signal for the discretionary edge.
+  - **Portfolio heat:** now factors total $-risk (`total_max_loss`/`pct_of_account`) and never reads SAFE while a leg is RED (no longer put/call-balance-only).
+  - **Escalation moat-floor:** `_get_escalation_level(..., moat=)` floors danger by moat so a re-entered/edited position can't launder its escalation clock.
+  - **EXIT-grade:** risk-prudent exits (warning-zone OR over-cap OR trend-continuation) graded JUSTIFIED, not PREMATURE.
+  - **Display:** neg-GEX gating of the wall-pull message; expected-move-based ("X× the 1σ left today") card likelihood instead of realized-range "very unlikely".
+  - **Follow-ons (same evening):** `compute_rsi_50_price()` (the price that neutralizes RSI to 50 → a *moving* Key Level to bracket vs the gamma magnet); `gex_regime_raw` exposed (raw vs stabilized sign); **`compute_magnet_forces()`** — GEX-wall / RSI-50 / Trend pull-strengths (0-100), the predicted magnet level (Trend reinforces the level in its direction), and a distribution-based touch-by-close % (reflection-principle on remaining 1σ); UI "Price Magnet" panel. Heuristic decision-support, to be validated against outcomes over time.
+  - 93 tests (67 `test_engine.py` + 26 `test_positions.py`), all passing; synthetic_replay GR-0513/0518/0519 force + GR-0529 hold PASS.
+
+* **[V5.7] P0-2 Regime-Conditional EJECT + Sizing Guardrail (2026-05-29):**
+  - **P0-2:** `evaluate_positions()` computes `mean_reverting` (positive GEX + no surge) vs `trend_continuation`. (a) Outside a mean-reverting regime, the user-facing action is forced to the escalation level when escalation is URGENT/CRITICAL and the action is a `HOLD_*` (fixes the final-hour action/escalation desync — the 5/13 trap; sets `p0_2_forced`). (b) The C2 reversal-downgrade is now gated to `mean_reverting` only (no longer softens a close in a trend-continuation regime). New position fields: `mean_reverting`, `trend_continuation`.
+  - **Validation:** `backend/synthetic_replay.py` drives `evaluate_positions` bar-by-bar with an injected bar-time clock. **GR-0513** (5/13 trend-through) forces a non-downgradable exit ~14 pts before breach; **GR-0529** (5/29 positive-GEX bounce, +$1,255 live) is NOT force-closed; calm-day guard clean.
+  - **P0-3 (partial):** `config.ACCOUNT_SIZE`/`MAX_RISK_PER_TRADE` ($2,000) + `engine.calculate_position_risk()`. Engine still contract-count-blind — wiring is P0-3a.
+  - 77 tests (51 `test_engine.py` + 26 `test_positions.py`), all passing.
+  - Driven by a full-codebase audit + a live trading session — see docs/IMPLEMENTATION_PLAN.md, docs/VALIDATION_PLAN.md, docs/MONDAY_PREP.md, docs/trading_log_2026-05-29.md.
 
 * **[V5.6] Phase 16 — Algo Intelligence (C1-C4):**
   - C1: Conditional expected move — `compute_expected_move()` discounts remaining σ by move already consumed from open. >0.3σ consumed triggers discount (floor 0.40×).

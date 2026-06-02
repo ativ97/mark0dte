@@ -2,7 +2,7 @@
 
 A decision-support system for selling SPX 0DTE credit spreads. Combines real-time market data (Alpaca, Yahoo Finance, ThetaData) with regime classification, smart moat calculation, and position management.
 
-**Current Version**: Phase 16 (V5.5+ with conditional expected move, reversal-aware exits, time-adjusted take profit)
+**Current Version**: V5.7 (P0-2 regime-conditional EJECT + sizing guardrail; builds on Phase 9 Signal Outcome Tracker v2, SPXW direct pricing, premium velocity)
 
 ## 1. Setup the Python Backend
 
@@ -27,8 +27,9 @@ The server is now running on http://127.0.0.1:8000.
 
 ```sh
 cd backend
-python -m pytest test_engine.py -v --tb=short
-# Expected: 18 passed
+python -m pytest test_engine.py test_positions.py -v --tb=short
+# Expected: 77 passed (51 test_engine + 26 test_positions)
+python synthetic_replay.py   # P0-2 regime-gate validation: GR-0513 + GR-0529 must PASS
 ```
 
 ## 2. Setup the React Frontend

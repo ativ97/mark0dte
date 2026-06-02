@@ -1,32 +1,44 @@
 # 0DTE Quant Engine — AI Agent Rules & Notes
-# This file is automatically loaded by Windsurf at the start of every session.
-# Keep it updated with hard-won knowledge, gotchas, and conventions.
+# This file provides context and rules for AI coding agents (Claude, Cursor, Copilot, etc.)
+# working on this project. It mirrors `.windsurfrules` and must be kept in sync.
 # Last updated: 2026-06-01 (live checkpoint + 8 post-session fixes: GEX hysteresis, side-aware GEX, heat exposure, FADE-REGIME read, escalation moat-floor, EXIT-grade, 2 display fixes)
+
+---
 
 ## MANDATORY AGENT RULES
 
-1. **AUTO-UPDATE THIS FILE**: Whenever you discover a new gotcha, implement a new feature, fix a bug, or learn something the hard way — **immediately update this `.windsurfrules` file** before ending your response. Add it to the appropriate section (KNOWN PITFALLS, ALGORITHM VERSION HISTORY, etc.). Update the "Last updated" date above.
-1b. **KEEP `CLAUDE.md` IN SYNC**: `CLAUDE.md` at project root is a mirror of this file for other AI agents (Claude, Cursor, Copilot). Whenever you edit `.windsurfrules`, apply the same change to `CLAUDE.md` and vice versa. Both files must always contain identical rules, pitfalls, and architecture info.
-2. **ALWAYS READ THIS FILE FIRST**: At the start of every task, refer to this file for environment, conventions, and known pitfalls. Do NOT guess Python paths, SPX behavior, or function signatures — check here.
-3. **READ `docs/implementation_progress.md` ON EVERY CONTEXT SWITCH**: This file tracks all phase status, pending tasks, completed items, key file locations, and line numbers. Read it BEFORE starting any work to know where you left off. Update it AFTER completing any feature or fix — bump the STATUS line, check off items, add to COMPLETED ITEMS LOG, and update the KEY FILE LOCATIONS if line numbers shifted.
+1. **READ THIS FILE FIRST**: At the start of every task, read this file in full for environment setup, conventions, known pitfalls, and architecture. Do NOT guess Python paths, SPX behavior, or function signatures — check here first.
+
+2. **READ `docs/implementation_progress.md` ON EVERY CONTEXT SWITCH**: This file tracks all phase status, pending tasks, completed items, key file locations, and line numbers. Read it BEFORE starting any work to know where you left off. Update it AFTER completing any feature or fix — bump the STATUS line, check off items, add to the COMPLETED ITEMS LOG, and update KEY FILE LOCATIONS if line numbers shifted.
+
+3. **UPDATE THIS FILE AND `.windsurfrules`**: Whenever you discover a new gotcha, implement a new feature, fix a bug, or learn something the hard way — immediately update BOTH this file and `.windsurfrules` before ending your response. Add it to the appropriate section (KNOWN PITFALLS, ALGORITHM VERSION HISTORY, etc.). Update the "Last updated" date above.
+3b. **KEEP `.windsurfrules` IN SYNC**: `.windsurfrules` at project root is a mirror of this file used by Windsurf/Cascade. Whenever you edit `CLAUDE.md`, apply the same change to `.windsurfrules` and vice versa. Both files must always contain identical rules, pitfalls, and architecture info.
+
 4. **KEEP DOCS IN SYNC**: When implementing a new feature or changing algo behavior:
    - Update `docs/Algorithm_States.md` — add changelog entry, update version number, update relevant sections.
    - Update `docs/User_Manual.md` — if the change affects what the user sees on the dashboard.
    - Update `readme.md` — if the change affects setup, environment, or test count.
-   - Update test count in this file if tests are added/removed.
+   - Update test count in this file AND `.windsurfrules` if tests are added/removed.
+
 5. **NEVER SILENTLY SWALLOW ERRORS**: If you encounter a new API quirk, data format issue, or environment problem, log it in KNOWN PITFALLS below with the fix.
+
 6. **VERIFY BEFORE CODING**: Before editing `engine.py`, `data_fetcher.py`, or `main.py`, re-read the KEY DATA FLOW and relevant function signatures below. Do not assume parameter lists from memory.
-7. **RUN TESTS AFTER EVERY CHANGE**: After editing any backend file, run `pytest test_engine.py -v --tb=short` and confirm all tests pass before considering the change done. The import smoke tests catch syntax errors and missing attributes. Never ship code that hasn't been tested.
+
+7. **RUN TESTS AFTER EVERY CHANGE**: After editing any backend file, run the test command below and confirm all tests pass before considering the change done. The import smoke tests catch syntax errors and missing attributes. Never ship code that hasn't been tested.
+
+---
 
 ## ENVIRONMENT
 
 - **Python**: `/Users/ativ.aggarwal/miniconda3/envs/mark/bin/python` (Python 3.13)
-- **Conda env**: `mark` (NOT `0dte_env`, the readme is outdated)
-- **NEVER use** `/usr/bin/python3` (system Python 3.9, missing all dependencies)
-- **Run tests**: `/Users/ativ.aggarwal/miniconda3/envs/mark/bin/python -m pytest test_engine.py test_positions.py -v --tb=short`. Also `python synthetic_replay.py` — P0-2 regime-gate validation; GR-0513 + GR-0529 must PASS.
-- **Start backend**: `/Users/ativ.aggarwal/miniconda3/envs/mark/bin/python -m uvicorn main:app --reload` from `backend/`
-- **Start frontend**: `npm run dev` from `frontend/`
+- **Conda env**: `mark` (NOT `0dte_env` — the readme is outdated)
+- **NEVER use** `/usr/bin/python3` — that is system Python 3.9, missing all dependencies
+- **Run tests**: `/Users/ativ.aggarwal/miniconda3/envs/mark/bin/python -m pytest test_engine.py test_positions.py -v --tb=short` (from `backend/`). Also run `python synthetic_replay.py` — the P0-2 regime-gate validation; GR-0513 and GR-0529 must both PASS.
+- **Start backend**: `/Users/ativ.aggarwal/miniconda3/envs/mark/bin/python -m uvicorn main:app --reload` (from `backend/`)
+- **Start frontend**: `npm run dev` (from `frontend/`)
 - **Test count**: 94 tests as of 2026-06-01 — **68 in `test_engine.py`** (55 + 2 portfolio-heat exposure + 1 EXIT-grade JUSTIFIED + 4 GEX-hysteresis/side-aware + 3 RSI-50-price + 2 magnet-forces + 1 serialization-native-types regression) + **26 in `test_positions.py`**. Run BOTH files. Plus `synthetic_replay.py` (P0-2 regime gate: GR-0513/0518/0519 force-exit + GR-0529 hold must all PASS). All must pass before any PR.
+
+---
 
 ## PROJECT STRUCTURE
 
@@ -38,23 +50,29 @@ mark/
 │   ├── data_fetcher.py     # Alpaca, Yahoo, ThetaData, VIX, GEX fetchers
 │   ├── config.py           # All thresholds and constants
 │   ├── database.py         # SQLAlchemy models (PositionDB, ClosedPositionDB)
-│   ├── accuracy_tracker.py # Recommendation accuracy logging
+│   ├── accuracy_tracker.py # Signal Outcome Tracker v2 (was accuracy tracker v1)
 │   ├── backtester.py       # Historical trade backtester
 │   ├── synthetic_replay.py # P0-2 validation harness (drives evaluate_positions bar-by-bar, injected clock)
 │   ├── test_engine.py      # Unit tests (51 tests)
 │   ├── test_positions.py   # evaluate_positions unit tests (26 tests)
 │   └── requirements.txt
 ├── frontend/
-│   └── src/app.jsx         # Single-file React dashboard (Tailwind v4)
+│   └── src/app.jsx         # Single-file React dashboard (Tailwind v4, ~2300 lines)
 ├── docs/
 │   ├── Algorithm_States.md # Algo spec & version log (V5.5+)
 │   ├── User_Manual.md      # Dashboard user guide
 │   └── trading_log_*.md    # Daily trading session logs
 ├── tradehistory/           # Robinhood CSV exports
+├── .windsurfrules          # Windsurf-specific agent rules (mirror of this file)
+├── CLAUDE.md               # This file — for Claude and other agents
 └── readme.md               # Setup guide (NEEDS UPDATE — still says Python 3.9)
 ```
 
+---
+
 ## KEY DATA FLOW (Telemetry Endpoint)
+
+The main telemetry endpoint (`GET /api/telemetry`) is the core pipeline. Understanding this flow is critical before making any changes:
 
 ```
 GET /api/telemetry →
@@ -71,14 +89,20 @@ GET /api/telemetry →
   11. generate_recommendations() → prioritized action items
 ```
 
+---
+
 ## SPX / SPY CRITICAL GOTCHAS
 
-- **SPX is not directly available from Alpaca.** We use SPY as data proxy for indicators.
+These are the most dangerous pitfalls in this codebase. Violating any of these will cause incorrect risk calculations:
+
+- **SPX is not directly available from Alpaca.** We use SPY as a data proxy for all TA indicators.
 - **SPX live price**: Fetched from Yahoo Finance `^GSPC` via `fetch_spx_live_price()`. Falls back to `SPY × SPX_PROXY_MULTIPLIER` (default 10.0).
 - **SPX day range**: Fetched from Yahoo `^GSPC` via `fetch_spx_day_range()`. Falls back to SPY × ratio.
 - **SPX/SPY ratio DRIFTS over time** due to dividends and expense ratio. At SPX ~7500, a 0.1% drift = ~7.5 pts — this is significant when GAMMA_TRAP_THRESHOLD is only 10 pts.
 - **NEVER assume SPX = SPY × 10 exactly.** Always use the dynamically computed `spx_spy_ratio` from main.py.
 - **SPX day open**: Added in Phase 16 from Yahoo `fast_info.get("open")`. Used for move-consumed calculations.
+
+---
 
 ## CODING CONVENTIONS
 
@@ -90,26 +114,48 @@ GET /api/telemetry →
 - **Imports**: Always at top of file. Never import mid-file.
 - **Config constants**: All thresholds live in `config.py`. Never hardcode magic numbers in engine.py.
 
+---
+
 ## KNOWN PITFALLS & LESSONS LEARNED
 
+These are hard-won lessons from live trading and development. Read them all:
+
 1. **Yahoo `fast_info` field names vary**: Sometimes `dayHigh` vs `day_high`, `lastPrice` vs `last_price`. Always check both with `or`.
+
 2. **SQLite strips timezone info**: When reading `breach_start_time` from DB, always call `.replace(tzinfo=timezone.utc)` if tzinfo is None.
+
 3. **Alpaca bars are SPY, not SPX**: All TA indicators (RSI, CHOP, ER, VWAP) are computed on SPY prices. Only the moat/strike math uses SPX.
+
 4. **Premium estimation is NOT accurate**: The buyback fraction model (`estimate_credit()`) overestimates by ~$0.40 for far-OTM strikes. Now replaced by live SPXW pricing in both positions AND proposals. EST fallback only when ThetaData unavailable.
+
 5. **GEX data from ThetaData can be stale**: Cache TTL is 120s. If ThetaData is down, `gex_data` will be None — all GEX-dependent code must handle None gracefully.
+
 6. **Pydantic schemas must match engine return dicts**: If you add a field to `compute_smart_moat()` output, you MUST also add it to the `SmartMoat` class in main.py (with a default value for backward compat).
+
 7. **`evaluate_positions` takes a SQLAlchemy session**: It commits breach_start_time changes directly. Mock it in tests with `MagicMock()`.
+
 8. **Recommendation persistence state is global**: `_rec_state`, `_escalation_state`, etc. are module-level dicts. Call `clear_rec_state()` between test cases to avoid cross-contamination.
-9. **Frontend is a single file**: `app.jsx` is the entire React app (~2000+ lines). No component decomposition yet.
+
+9. **Frontend is a single file**: `app.jsx` is the entire React app (~2300+ lines). No component decomposition yet.
+
 10. **Range position can be 0-100**: 0% = at day low, 100% = at day high, 50% = midpoint. Used extensively in moat/risk calculations.
+
 11. **Config imports are explicit**: engine.py uses `from config import ...` with named imports. If you reference a new config constant, you MUST add it to the import list. `SAFE_ZONE_THRESHOLD` (25) = `WARNING_ZONE_THRESHOLD` (25) — same value, different semantic intent.
+
 12. **`.get(key, default)` does NOT protect against explicit None**: If a dict has `{"trigger_spx": None}`, `.get("trigger_spx", fallback)` returns `None`, NOT the fallback. Always use `d.get(key) or fallback` when the value can be explicitly None.
+
 13. **SPX spread ≠ SPY spread in width**: A $5 SPX spread maps to ~$0.50 SPY (≈$1 after rounding to nearest strike). The SPY spread mid-price must be multiplied by `width_ratio` (SPX_width / SPY_width ≈ 5) to get the SPX-equivalent buyback price. `SPREAD_WIDTH_SPX = 5.0` is in config.py. Always assume $5 SPX width unless the user says otherwise.
+
 14. **SPXW vs SPY quote source**: `fetch_live_option_quotes()` tries SPXW (direct SPX options) first, falls back to SPY. SPXW quotes use SPX strikes directly (no conversion, width_ratio=1.0). SPY quotes need SPX→SPY strike conversion + width_ratio scaling. The `quote_source` field ("SPXW" or "SPY") flows through to `get_spread_buyback_price()` and `pricing_source` on position cards.
+
 15. **Post-event detection requires ring buffer data**: `detect_post_event_shift()` looks for pre-event snapshots in `_telemetry_snapshots`. If the system wasn't running before the event, it returns UNKNOWN shift type. Event times are hard-coded (FOMC=14:00 ET, CPI/NFP=8:30 ET).
+
 16. **Trade proposal credits are now live-priced**: `auto_propose_positions()` receives `live_quotes` + `quote_source` and calls `get_spread_buyback_price()` for each candidate. Only falls back to `estimate_credit()` heuristic when live quotes are unavailable. Proposals with credit < $0.15 are filtered. The `credit_source` field ("SPXW"/"SPY"/"EST") is included in each proposal.
+
 17. **ThetaData client needs threading lock**: `_get_theta_client()` uses `threading.Lock()` with double-check pattern. Without it, concurrent FastAPI requests create multiple auth sessions and ThetaData rejects all but one.
+
 18. **Escalation ladder ignores profit state**: The `_get_escalation_level()` ratchets purely on time-in-danger, reaching CRITICAL_EJECT after ~12 min even when position is 67% profitable. Fixed: profit-aware cap in `evaluate_positions()` — caps escalation at CLOSE_RECOMMENDED when profit_pct ≥ 50%, reframes exit as TAKE_PROFIT. Also: take-profit recommendations now fire for warning-zone profitable positions (previously blocked by moat filter).
+
 19. **Old accuracy tracker measured wrong thing**: V1 (`accuracy_log.jsonl`) counted "exit signal on losing trade = correct" — meaningless when all trades win. V2 Signal Outcome Tracker (`signal_log.jsonl`) measures dollar-valued correctness: exit_savings = final_cost - buyback_at_signal. Grades: CORRECT (saved money), JUSTIFIED (cost more but risk was real — moat hit gamma trap), PREMATURE (position recovered, signal was early), WRONG (hold that lost money). TAKE_PROFIT is now classified as EXIT signal.
 
 20. **EJECT must be regime-conditional (P0-2, 2026-05-29)**: The final-hour / final-30-min warning-zone exit branches emitted `HOLD_FOR_EXPIRY`/`HOLD_WITH_TRIGGER` even while the escalation ladder had reached URGENT/CRITICAL — an action/escalation desync that let a with-trend short ride to the strike (the 5/13 −$1,696 setup; reproduced in `synthetic_replay.py`). Fix in `evaluate_positions()` (~line 2021): compute `mean_reverting = (gex_regime == "POSITIVE") and not surge` vs `trend_continuation`. (a) Outside a mean-reverting regime, force the action to the escalation level when it is URGENT/CRITICAL and currently a `HOLD_*` (sets `p0_2_forced`). (b) The reversal-downgrade is now gated to `mean_reverting` only — never softens a close in a trend-continuation regime. Validated by `synthetic_replay.py`: **GR-0513** (force a non-downgradable exit before breach) + **GR-0529** (hold the positive-GEX bounce, +$1,255 live on 5/29). Adds `mean_reverting`/`trend_continuation` to the position dict — add them to the `EvaluatedPosition` Pydantic model in main.py to surface in the API (else dropped — pitfall #6).
@@ -123,6 +169,8 @@ GET /api/telemetry →
 24. **Escalation has a moat floor; editing a position no longer launders danger (2026-06-01)**: `_get_escalation_level(pos_id, in_danger, moat=)` floors the level by moat (≤`GAMMA_TRAP_THRESHOLD`→CLOSE_RECOMMENDED, ≤`WARNING_ZONE_THRESHOLD`→WARNING) so a fresh/re-entered position reflects real danger immediately (6/1 call re-entry reset CRITICAL_EJECT→CAUTION). Floor only RAISES, never downgrades; `moat=None` keeps old behavior (existing tests). EXIT grading: `_grade_signal` marks a premature-on-price exit JUSTIFIED when `worst_moat < WARNING_ZONE` OR `over_limit_at_signal` OR `trend_continuation_at_signal` — don't penalize a risk-prudent over-cap exit that happened to recover (the 6/1 call). `track_signal` now captures `over_limit`/`trend_continuation`.
 
 25. **numpy types crash serialization of free-`dict` response fields (2026-06-01)**: Pydantic v2 cannot serialize `numpy.bool_`/`numpy.float64` → `PydanticSerializationError: Unable to serialize unknown type: numpy.bool`. Free-`dict` schema fields (`magnet_forces`, `mean_reversion`, `portfolio_heat`) pass extra keys through (good — pitfall #6) but ALSO pass numpy scalars straight to the serializer. Live inputs (`rsi_14`, `er_value`, `net_gex`, `gamma_wall_spx`) arrive as `numpy.float64`, so any comparison/round on them yields a numpy scalar. **FIX: coerce to native `bool()/int()/float()` before anything lands in a free-dict field** — done in `compute_magnet_forces` and the side-aware `mean_reverting`/`trend_continuation`. Crashed the telemetry endpoint on 6/1 *with 0 positions* (always-computed `magnet_forces.trend_dominant` was `numpy.bool_`). Regression-tested (`test_magnet_forces_returns_native_types`).
+
+---
 
 ## ALGORITHM VERSION HISTORY (Key milestones)
 
@@ -139,6 +187,8 @@ GET /api/telemetry →
 - **P0-2 + sizing (2026-05-29)**: Full-codebase audit → docs/IMPLEMENTATION_PLAN.md (P0–P3 + L1–L11 live findings) + docs/VALIDATION_PLAN.md (T0/T1/T2 ladder) + docs/MONDAY_PREP.md. Synthetic-replay harness `synthetic_replay.py` reproduced the 5/13 EJECT-hold bug. **P0-2 regime-conditional EJECT** in `evaluate_positions`: forces a non-downgradable exit on a with-trend short in a trend-continuation (non-positive-GEX/surge) regime, holds in a positive-GEX mean-reverting regime — validated GR-0513 (5/13 loss) + GR-0529 (5/29 +$1,255 bounce). **Sizing guardrail (partial)**: `config.MAX_RISK_PER_TRADE`=$2,000 + `engine.calculate_position_risk()` (not yet wired — engine is contract-count-blind, P0-3a). Full live-session log: docs/trading_log_2026-05-29.md.
 - **Live checkpoint + 8 fixes (2026-06-01, current)**: First live run of the 5/29 batch (logged in docs/trading_log_2026-06-01.md, ~+$1,500 realized). **H1/H2/H4 validated live**; the **P0-2 force-path was NOT exercised** (a chop/mean-reverting day, no trend-through) — so the 5/13 fix is still UNPROVEN live; needs a genuine trend day. Shipped 8 post-session fixes (**88 tests + harness green**): **GEX hysteresis deadband** (`stabilize_gex_regime`, `config.GEX_REGIME_BAND`), **side-aware `mean_reverting`** (magnet protects only when between spot and strike — pitfall #22), **portfolio-heat exposure + any-RED-leg** (`total_max_loss`/`pct_of_account` — pitfall #23), **`mean_reversion_status` "FADE REGIME ON/OFF" read** (serves the discretionary GEX-wall/RSI-fade/gap-fade edge), **escalation moat-floor** + **EXIT-grade JUSTIFIED** (pitfall #24), plus display fixes (negative-GEX wall-message gating; expected-move-based card likelihood, not realized range). Frontend: FADE REGIME badge + book-risk chip on the heat banner. Logged bugs A–E from the session are all fixed. **Follow-ons (same evening):** `engine.compute_rsi_50_price()` — the price that neutralizes RSI to 50, surfaced as a *moving* Key Level (`rsi_50_price`, SPX) to bracket against the gamma magnet for the discretionary RSI-fade target; and `gex_regime_raw` added to the `GexData` schema (it was Pydantic-dropped — pitfall #6 caught live). Plus a **Price Magnet panel** (`engine.compute_magnet_forces`): GEX-wall / RSI-50 / Trend pull-strengths (0–100), the predicted magnet level (Trend reinforces the level in its direction), and a distribution-based touch-by-close % (reflection-principle on the remaining 1σ) — heuristic decision support, surfaced as `magnet_forces`. **93 tests.**
 
+---
+
 ## SMART MOAT: 7 MULTIPLICATIVE FACTORS
 
 ```
@@ -154,40 +204,65 @@ combined = range × signal × time × exhaustion × event × gex × move_consume
 7. **Move consumed** (Phase 16): >0.3σ consumed → ×0.80-0.65
 8. **IB breakout** (Phase 7): 1× IB → ×1.05, 2× → ×1.10, 3×+ → ×1.15
 
-## PHASE 2 UI — COMPLETED
+---
 
-- `generate_market_insights()` in engine.py — produces market_light, market_story, position_cards, key_levels, action_items
-- `_compute_heat_score()` in engine.py — 0-100 danger score per position (5 factors: moat, bias, GEX, ER, time)
-- `MarketInsights` + sub-schemas in main.py — InsightPositionCard (with `context` field), InsightKeyLevel, InsightActionItem
-- **Tooltips on everything**: Every metric, score, and badge has plain-English hover tooltip.
-- **GEX wall strength + badge + volume table**: Magnitude bars, sorted by gamma, nearby highlighted.
-- **Position card context**: "SPX needs to rise 45 pts to reach your strike. Today's range is only 38 pts — very unlikely."
-- **Key Levels dedup + vertical ladder**: Single column sorted high→low with SPX NOW marker.
+## KEY THRESHOLDS (from config.py)
 
-## PHASE 3 UI — COMPLETED (Full Overhaul)
+- `WARNING_ZONE_THRESHOLD = 25` — moat ≤ 25 pts = warning zone
+- `GAMMA_TRAP_THRESHOLD = 10` — moat ≤ 10 pts = gamma trap (immediate danger)
+- `REC_COOLDOWN_MINUTES = 10` — recommendation cooldown between transitions
+- `SPREAD_WIDTH_SPX = 5.0` — standard $5 SPX credit spread width
+- `SPX_PROXY_MULTIPLIER = 10.0` — fallback SPX/SPY ratio
+- `MIN_SIGNALS_FOR_DISPLAY = 10` — signal scorecard hidden until 10+ resolved signals
 
-- **Sticky header bar**: Persistent bar at top: SPX price, regime, bias, smart moat, GEX regime+magnitude, time remaining, CT clock. Always visible when scrolling. Uses `sticky top-0 z-30`.
-- **Layer flip (A)**: Narrative on TOP (open by default), Raw Dashboard BELOW (collapsed by default). Users see the story first, data second. `showRaw` state defaults to `false`.
-- **Key Evidence layer (B)**: NEW middle section with 6 curated indicators: ER (trend strength + visual bar), RSI (momentum + zone labels + reversal warning), GEX (dealer positioning + gamma wall distance), Day Range (position in range + endpoints), Smart Moat (vs closest position), VIX (volatility level + move consumed %).
-- **Attention system (F)**: Evidence cards get dynamic `ring-1 ring-red-500/30` borders when in dangerous states (ER pushing toward strikes, RSI extreme, GEX negative, range extreme, moat breached, VIX high). Built into Evidence layer.
-- **Position management in narrative (D)**: Close/Delete buttons added directly to narrative position cards. Users manage positions from Layer 1 without opening the raw dashboard. Uses existing `closePosition(card.id)` and `deletePosition(card.id)` handlers.
-- **Quick Add button**: "+ Add Position / Analyze Trade" button in narrative that opens the raw dashboard.
-- **Raw dashboard grouping (C)**: Section headers ("Price & Trend", "Risk, Regime & Directives") within the raw dashboard for visual organization.
-- **3-layer architecture**: Layer 1 = Narrative (story + positions + key levels), Layer 2 = Evidence (curated indicators), Layer 3 = Raw Dashboard (full data). Progressive disclosure from conclusions → reasoning → raw data.
+---
 
-## PHASE 4 — COMPLETED (Trend Deltas + GEX Proximity)
+## ESCALATION LEVELS
 
-- **Ring buffer** (`_telemetry_snapshots` deque, maxlen=5): Stores key indicator values per refresh. Exposed as `previous_snapshot` in TelemetryResponse.
-- **Trend arrows (#29, #36)**: ER, RSI, GEX cards in Evidence layer show ▲/▼ arrows + "(was X)" when delta exceeds threshold. Thresholds: ER ±0.02, RSI ±2, GEX ±3M.
-- **"What Changed" badges**: Row above Evidence grid showing biggest deltas since last refresh (ER, RSI, GEX, SPX, Range). Thresholds: ER ±0.05, RSI ±3, GEX ±5M, SPX ±2, Range ±10%.
-- **GEX Wall Proximity (#26)**: Per-position `gex_proximity` field in InsightPositionCard. Shows "Put Wall 7480: 20 pts below your strike" or "Gamma Wall is ABOVE your strike — protecting you". Displayed as purple text on narrative position cards.
-- **Files**: main.py (ring buffer, `previous_snapshot` field, `gex_proximity` schema), engine.py (gex_proximity computation in `generate_market_insights`), app.jsx (deltas, arrows, badges, gex_proximity display).
+Positions escalate through danger levels based on time-in-danger-zone:
 
-## WHAT'S NEXT (Phase 5 — Polish + Advanced)
+```
+CAUTION → WARNING → CLOSE_RECOMMENDED → URGENT_CLOSE → CRITICAL_EJECT
+```
+
+- Profit-aware cap: if profit_pct ≥ 50% and moat in warning zone (not gamma trap), escalation is capped at CLOSE_RECOMMENDED and action is reframed as TAKE_PROFIT.
+
+---
+
+## SIGNAL OUTCOME TRACKER (accuracy_tracker.py)
+
+The system tracks every signal with full market context and grades it on resolution:
+
+- **EXIT signals** (CLOSE_NOW, CLOSE_SOON, URGENT_CLOSE, CRITICAL_EJECT, TAKE_PROFIT):
+  - Graded by `exit_savings = final_cost - buyback_at_signal`
+  - CORRECT (saved money), JUSTIFIED (cost more but risk was real), PREMATURE (position recovered), NEUTRAL (±$0.05)
+
+- **HOLD signals** (HOLD, HOLD_WITH_TRIGGER, HOLD_FOR_EXPIRY, LET_EXPIRE):
+  - CORRECT (trade profited), WRONG (trade lost money)
+
+- **Between signals**: tracks worst_moat_after, best_moat_after, worst_buyback_after, best_buyback_after
+- **Log file**: `signal_log.jsonl` (one finalized signal per line)
+- **API functions**: `track_signal()`, `resolve_position()`, `clear_position_state()`, `get_accuracy_stats()`, `get_signal_log()`
+
+---
+
+## FRONTEND ARCHITECTURE
+
+- Single-file React app (`app.jsx`, Tailwind v4)
+- **3-layer layout**: Narrative (story + positions) → Evidence (curated indicators) → Raw Dashboard (full data)
+- **Sticky header**: SPX price, regime, bias, smart moat, GEX, time remaining
+- **Key widgets**: Signal Scorecard, Position Summary, Portfolio Heat, Surge Alert, Post-Event Banner, Gap Rejection Banner
+- **Telemetry polling**: Fetches `/api/telemetry` every 30 seconds
+
+---
+
+## WHAT'S NEXT (backlog)
 
 - RSI Reversal Warning Badge (#35): "Overbought — reversal likely" on RSI card + story
 - Explain Mode toggle (inline tooltips on technical terms)
 - Premium History / Velocity (#28): sparkline or last-5-values
 - "What if" scenarios: premium estimation at hypothetical SPX prices
 - EOD review generator: "Today you learned..."
-- See trading_log_2026-05-26.md for full phased plan
+- GEX Wall Pressure (Phase 8 — DEFERRED): time-near-wall metric, wall pressure on position cards
+- Shadow Trader (DEFERRED): simulated position-taking to compare algo vs user performance
+- See `docs/trading_log_2026-05-26.md` for full phased plan
