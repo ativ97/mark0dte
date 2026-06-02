@@ -35,6 +35,7 @@ logger = logging.getLogger("signal_tracker")
 MIN_SIGNALS_FOR_DISPLAY = 10
 SIGNAL_LOG_FILE = Path(__file__).parent / "signal_log.jsonl"
 SPREAD_WIDTH = 5.0  # $5 SPX spread width — max loss per contract
+WARNING_ZONE = 25.0  # mirrors config.WARNING_ZONE_THRESHOLD — moat below this = danger zone
 
 # Actions that represent "system says close"
 _EXIT_ACTIONS = {"CLOSE_NOW", "CLOSE_SOON", "URGENT_CLOSE", "CRITICAL_EJECT", "TAKE_PROFIT"}
@@ -112,18 +113,31 @@ def _grade_signal(signal: dict) -> dict:
                 f"vs actual cost of ${final_cost:.2f}."
             )
         elif exit_savings < -0.05:
-            # Signal was premature — but was the risk real?
-            if worst_moat <= 10:
+            # Signal cost money vs holding — but was the exit risk-WARRANTED? An exit is
+            # JUSTIFIED (not premature) if the position entered the warning zone, OR was over
+            # the sizing cap, OR was in a trend-continuation regime — even if price later
+            # recovered. (2026-06-01: an over-cap call into the gamma magnet recovered on a
+            # late pullback, but the close was prudent; dollar-only grading mislabeled it
+            # PREMATURE. Broadened the gamma-trap-only rule to the full warning zone + size/regime.)
+            over_limit = signal.get("over_limit_at_signal", False)
+            trend_cont = signal.get("trend_continuation_at_signal", False)
+            if worst_moat < WARNING_ZONE or over_limit or trend_cont:
                 grade = "JUSTIFIED"
+                if worst_moat < WARNING_ZONE:
+                    why = f"moat hit {worst_moat:.0f} pts (warning zone)"
+                elif over_limit:
+                    why = "position was over the sizing cap"
+                else:
+                    why = "trend-continuation regime"
                 reason = (
-                    f"Exiting at ~${exit_cost:.2f} cost ${abs(exit_savings):.2f} extra "
-                    f"vs holding, BUT moat hit {worst_moat:.0f} pts — risk was real."
+                    f"Exiting at ~${exit_cost:.2f} cost ${abs(exit_savings):.2f} extra vs holding, "
+                    f"BUT {why} — risk-warranted exit."
                 )
             else:
                 grade = "PREMATURE"
                 reason = (
                     f"Exiting at ~${exit_cost:.2f} cost ${abs(exit_savings):.2f} extra. "
-                    f"Position recovered (worst moat {worst_moat:.0f} pts). Premature signal."
+                    f"Position recovered (worst moat {worst_moat:.0f} pts), size/regime OK. Premature signal."
                 )
         else:
             grade = "NEUTRAL"
@@ -158,7 +172,8 @@ def _grade_signal(signal: dict) -> dict:
 def track_signal(pos_id: int, pos_type: str, strike: float, credit: float,
                  action: str, regime_score: int, moat: float,
                  escalation: str | None = None, spx_price: float = 0,
-                 buyback: float = 0, hours_remaining: float = 0):
+                 buyback: float = 0, hours_remaining: float = 0,
+                 over_limit: bool = False, trend_continuation: bool = False):
     """
     Called every telemetry cycle for every position.
 
@@ -198,6 +213,8 @@ def track_signal(pos_id: int, pos_type: str, strike: float, credit: float,
             "is_exit_signal": action in _EXIT_ACTIONS,
             "escalation": escalation,
             "regime_score": regime_score,
+            "over_limit_at_signal": bool(over_limit),
+            "trend_continuation_at_signal": bool(trend_continuation),
             # Snapshot at signal time
             "spx_at_signal": round(spx_price, 2),
             "moat_at_signal": round(moat, 1),

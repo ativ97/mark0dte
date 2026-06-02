@@ -221,6 +221,11 @@ export default function App() {
                 GEX {telemetry.gex_data?.net_gex ? `${(telemetry.gex_data.net_gex/1e6).toFixed(0)}M` : ''}
               </span>
             )}
+            {telemetry.mean_reversion && (
+              <span className={`font-bold px-1.5 py-0.5 rounded ${telemetry.mean_reversion.on ? 'bg-cyan-900/40 text-cyan-300' : 'bg-orange-900/40 text-orange-300'}`} title={`Fade / mean-reversion playbook (GEX-wall, RSI-fade, gap-fade): ${telemetry.mean_reversion.reason}`}>
+                FADE {telemetry.mean_reversion.label}
+              </span>
+            )}
             {telemetry.time_pressure?.hours_remaining != null && (
               <span className={`${telemetry.time_pressure.hours_remaining < 1 ? 'text-red-400 font-bold' : telemetry.time_pressure.hours_remaining < 2 ? 'text-amber-400' : 'text-slate-400'}`} title="Hours remaining until market close">
                 {telemetry.time_pressure.hours_remaining.toFixed(1)}h left
@@ -384,13 +389,64 @@ export default function App() {
                   );
                 })()}
 
+                {/* Mean-Reversion / Fade Regime read (is the GEX-wall / RSI-fade / gap-fade playbook valid now?) */}
+                {telemetry.mean_reversion && (
+                  <div className={`rounded-lg p-2.5 border flex items-center gap-2 flex-wrap ${telemetry.mean_reversion.on ? 'bg-cyan-900/25 border-cyan-500/40' : 'bg-orange-900/25 border-orange-500/40'}`}>
+                    <span className={`text-xs font-bold px-2 py-0.5 rounded ${telemetry.mean_reversion.on ? 'bg-cyan-500/25 text-cyan-300' : 'bg-orange-500/25 text-orange-300'}`}>
+                      FADE REGIME: {telemetry.mean_reversion.label}
+                    </span>
+                    <span className="text-xs text-slate-300">{telemetry.mean_reversion.reason}</span>
+                  </div>
+                )}
+
+                {/* Price Magnet — which pull is strongest + predicted target */}
+                {telemetry.magnet_forces && (
+                  <div className="rounded-lg p-3 border border-slate-700/60 bg-slate-900/40">
+                    <div className="flex items-center gap-2 flex-wrap mb-2">
+                      <span className="text-xs font-bold uppercase tracking-wider text-slate-300">Price Magnet</span>
+                      {telemetry.magnet_forces.predicted_level && (
+                        <span className="text-xs font-semibold px-1.5 py-0.5 rounded bg-violet-500/20 text-violet-300">
+                          → {telemetry.magnet_forces.predicted_level}
+                          {telemetry.magnet_forces.touch_prob != null && <span className="text-violet-200"> · ~{telemetry.magnet_forces.touch_prob}% by close</span>}
+                        </span>
+                      )}
+                      {telemetry.magnet_forces.trend_dominant && (
+                        <span className="text-xs font-semibold px-1.5 py-0.5 rounded bg-orange-500/20 text-orange-300">TREND DOMINANT</span>
+                      )}
+                    </div>
+                    <div className="space-y-1.5">
+                      {telemetry.magnet_forces.forces?.map((f, i) => {
+                        const isTop = f.name === telemetry.magnet_forces.predicted_magnet;
+                        const barColor = f.name === 'Trend' ? 'bg-orange-400' : f.name === 'GEX Wall' ? 'bg-violet-400' : 'bg-cyan-400';
+                        return (
+                          <div key={i} className="flex items-center gap-2 text-xs">
+                            <span className={`w-24 shrink-0 ${isTop ? 'text-slate-100 font-semibold' : 'text-slate-400'}`}>{f.name}</span>
+                            <div className="flex-1 h-2 rounded-full bg-slate-700/60 overflow-hidden">
+                              <div className={`h-full ${barColor} ${isTop ? '' : 'opacity-60'}`} style={{ width: `${Math.max(2, Math.min(100, f.strength))}%` }}></div>
+                            </div>
+                            <span className={`w-8 text-right ${isTop ? 'text-slate-100 font-semibold' : 'text-slate-500'}`}>{f.strength}</span>
+                            <span className="w-14 text-right text-slate-500">{f.level ? f.level : '—'}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <p className="text-[11px] text-slate-300 mt-2">{telemetry.magnet_forces.headline}</p>
+                    <p className="text-[10px] text-slate-500 mt-0.5 italic">{telemetry.magnet_forces.caveat}</p>
+                  </div>
+                )}
+
                 {/* Portfolio Heat Banner */}
                 {telemetry.portfolio_heat && telemetry.portfolio_heat.level !== 'SAFE' && (
                   <div className={`rounded-lg p-3 border ${telemetry.portfolio_heat.level === 'DANGER' ? 'bg-red-900/30 border-red-500/50 text-red-300' : 'bg-amber-900/30 border-amber-500/50 text-amber-300'}`}>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
                       <span className={`text-sm font-bold ${telemetry.portfolio_heat.level === 'DANGER' ? 'text-red-400' : 'text-amber-400'}`}>
-                        {telemetry.portfolio_heat.level === 'DANGER' ? '\u26A0' : '\u26A0'} Portfolio Heat: {telemetry.portfolio_heat.level}
+                        {'\u26A0'} Portfolio Heat: {telemetry.portfolio_heat.level}
                       </span>
+                      {telemetry.portfolio_heat.pct_of_account != null && (
+                        <span className={`text-xs font-semibold px-1.5 py-0.5 rounded ${telemetry.portfolio_heat.pct_of_account >= 50 ? 'bg-red-500/20 text-red-300' : telemetry.portfolio_heat.pct_of_account >= 25 ? 'bg-amber-500/20 text-amber-300' : 'bg-slate-600/40 text-slate-300'}`}>
+                          Book risk ${Number(telemetry.portfolio_heat.total_max_loss).toLocaleString()} \u00B7 {telemetry.portfolio_heat.pct_of_account}% of acct
+                        </span>
+                      )}
                       <span className="text-xs text-slate-400 ml-auto">{telemetry.portfolio_heat.call_count}C / {telemetry.portfolio_heat.put_count}P</span>
                     </div>
                     <p className="text-sm mt-1">{telemetry.portfolio_heat.warning}</p>

@@ -13,6 +13,7 @@ from config import (
     STATE_A_MIN_MOAT, STATE_B_MIN_MOAT, STATE_C_MIN_MOAT,
     MARKET_CLOSE_HOUR_ET, GAMMA_ACCELERATION_HOUR_ET, FINAL_HOUR_MOAT_MULTIPLIER,
     SPREAD_WIDTH_SPX, ACCOUNT_SIZE, MAX_RISK_PER_TRADE, MAX_RISK_WARN,
+    GEX_REGIME_BAND,
 )
 from data_fetcher import get_spread_buyback_price
 
@@ -251,11 +252,18 @@ ESCALATION_LEVELS = ["CAUTION", "WARNING", "CLOSE_RECOMMENDED", "URGENT_CLOSE", 
 ESCALATION_MIN_HOLD_MINUTES = 3  # Minimum minutes at each level before escalating
 
 
-def _get_escalation_level(pos_id: int, in_danger: bool) -> dict:
+def _get_escalation_level(pos_id: int, in_danger: bool, moat: float | None = None) -> dict:
     """
     Returns the current escalation level for a position.
     If `in_danger` is True, escalates up (with min hold times).
     If False, de-escalates (resets).
+
+    Bug E (2026-06-01): danger must reflect the CURRENT moat, not only time-in-danger.
+    A fresh position (e.g. one re-entered/edited after a misentry) used to start at CAUTION
+    even with a deep warning-zone moat — laundering the danger clock (the 6/1 call re-entry
+    reset CRITICAL_EJECT -> CAUTION). `moat` (optional) sets a floor so a re-entered or
+    brand-new position immediately reflects real danger. It only ever RAISES the level, never
+    downgrades; callers that omit `moat` are unchanged.
     """
     now = datetime.now(timezone.utc)
     state = _escalation_state.get(pos_id)
@@ -273,10 +281,18 @@ def _get_escalation_level(pos_id: int, in_danger: bool) -> dict:
         _escalation_state.pop(pos_id, None)
         return {"level": "SAFE", "entered_at": None, "escalated_at": None}
 
+    # Moat-implied floor (CAUTION default; deeper moat = higher floor)
+    floor_idx = 0  # CAUTION
+    if moat is not None:
+        if moat <= GAMMA_TRAP_THRESHOLD:
+            floor_idx = 2  # CLOSE_RECOMMENDED
+        elif moat <= WARNING_ZONE_THRESHOLD:
+            floor_idx = 1  # WARNING
+
     if state is None:
-        # First time entering danger
+        # First time entering danger — start at the moat-implied floor, not always CAUTION
         _escalation_state[pos_id] = {
-            "level": "CAUTION",
+            "level": ESCALATION_LEVELS[floor_idx],
             "entered_at": now,
             "escalated_at": now,
         }
@@ -287,8 +303,13 @@ def _get_escalation_level(pos_id: int, in_danger: bool) -> dict:
     current_idx = ESCALATION_LEVELS.index(state["level"])
 
     if elapsed >= ESCALATION_MIN_HOLD_MINUTES and current_idx < len(ESCALATION_LEVELS) - 1:
-        new_level = ESCALATION_LEVELS[current_idx + 1]
-        state["level"] = new_level
+        current_idx += 1
+        state["level"] = ESCALATION_LEVELS[current_idx]
+        state["escalated_at"] = now
+
+    # Bug E: raise a lagging ladder up to the moat-implied floor (never downgrade)
+    if floor_idx > current_idx:
+        state["level"] = ESCALATION_LEVELS[floor_idx]
         state["escalated_at"] = now
 
     return state
@@ -1181,10 +1202,208 @@ def compute_smart_moat(regime_data: dict, spx_price: float,
     }
 
 
-def calculate_portfolio_heat(db_positions, directional_bias: str = "NEUTRAL") -> dict:
+def stabilize_gex_regime(net_gex, prev_regime=None, band: float = GEX_REGIME_BAND) -> str:
     """
-    Portfolio-level concentration risk assessment.
-    Flags when all positions are on the same side (e.g., all Calls = 100% top-side exposure).
+    Hysteresis / deadband for the GEX regime sign (2026-06-01). Without this, net_gex hovering
+    near zero flips POSITIVE<->NEGATIVE every bar, whipsawing the smart-moat GEX factor
+    (x0.85 vs x1.25) and the P0-2 arm-state (6/1: recommended moat swung 75->104->58->89->77 in
+    minutes on tiny GEX wiggles). Rule: only flip to POSITIVE/NEGATIVE when net_gex crosses
+    +/-band; within the band, hold the previous regime (sticky). With no prior strong regime and
+    within the band, report NEUTRAL.
+    """
+    if net_gex is None:
+        return prev_regime if prev_regime in ("POSITIVE", "NEGATIVE") else "NEUTRAL"
+    if net_gex >= band:
+        return "POSITIVE"
+    if net_gex <= -band:
+        return "NEGATIVE"
+    return prev_regime if prev_regime in ("POSITIVE", "NEGATIVE") else "NEUTRAL"
+
+
+def mean_reversion_status(gex_data, regime_data, surge_data=None) -> dict:
+    """
+    "Is the fade / mean-reversion playbook valid right now?" (2026-06-01).
+    Built for the discretionary edge that has been working: GEX-wall target, RSI fade, and
+    fading the opening gap — all mean-reversion bets that win in range-bound/positive-GEX
+    regimes but are the LOSING side on a trend / negative-GEX day. This gives one explicit
+    read so the regime that breaks those heuristics is unmissable.
+
+    ON  = stabilized POSITIVE GEX, no active surge, not a strong directional trend.
+    OFF = GEX negative/neutral, a surge is firing, or a strong trend is established.
+    """
+    gex_regime = (gex_data or {}).get("gex_regime")
+    surge = bool(surge_data and surge_data.get("surge_type") in ("TREND_SURGE", "VOLATILE_SURGE")
+                 and surge_data.get("fade_multiplier", 0) > 0.3)
+    er = (regime_data or {}).get("er_value", 0) or 0
+    state = (regime_data or {}).get("regime_state", "") or ""
+    strong_trend = ("STATE A" in state) and er >= 0.45
+
+    reasons = []
+    if gex_regime != "POSITIVE":
+        reasons.append(f"GEX {gex_regime or 'n/a'} — no dealer mean-reversion cushion")
+    if surge:
+        reasons.append("active surge")
+    if strong_trend:
+        reasons.append(f"strong trend (State A, ER {er:.2f})")
+
+    on = not reasons
+    return {
+        "on": on,
+        "label": "ON" if on else "OFF",
+        "reason": ("Positive GEX, no surge, no strong trend — fade / mean-reversion setups favored."
+                   if on else "Fade playbook suspended: " + "; ".join(reasons) + "."),
+    }
+
+
+def compute_rsi_50_price(closes, period: int = 14):
+    """
+    The price (in the series' units) that would bring the NEXT bar's Wilder RSI to 50 — i.e.,
+    the short-term momentum 'mean' that RSI measures deviation from (2026-06-01, for the
+    discretionary RSI-fade target). For RSI>50 it sits BELOW the last close (a pullback target);
+    for RSI<50, above. Closed form for a one-bar move: price = last_close - (period-1) *
+    (avgGain - avgLoss), with avgGain/avgLoss the current Wilder averages.
+    NOTE: this is a MOVING level — it recomputes every bar — NOT a fixed level like a gamma wall.
+    Returns None on insufficient data.
+    """
+    try:
+        vals = [float(c) for c in closes if c is not None]
+    except (TypeError, ValueError):
+        return None
+    if len(vals) < period + 1:
+        return None
+    gains, losses = [], []
+    for i in range(1, len(vals)):
+        d = vals[i] - vals[i - 1]
+        gains.append(d if d > 0 else 0.0)
+        losses.append(-d if d < 0 else 0.0)
+    # Wilder seed = simple average of the first `period`, then smoothed forward
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+    return round(vals[-1] - (period - 1) * (avg_gain - avg_loss), 2)
+
+
+def compute_magnet_forces(spx_price, gex_data=None, rsi_14=50.0, regime_data=None,
+                          expected_move_data=None, rsi_50_spx=None,
+                          surge_data=None, hours_remaining=6.5):
+    """
+    Decompose the competing intraday pulls on price into comparable 0-100 strengths so the UI
+    can show WHICH is dominant today and where price is favored (2026-06-01). Three forces:
+      - GEX Wall: gamma magnet — strong only in POSITIVE GEX, scaled by net-GEX magnitude,
+        proximity, and time-of-day (pins harder into the close); ~0 in negative/neutral GEX.
+      - RSI-50 Mean: mean-reversion pull — scaled by RSI extension from 50 + a mean-reverting
+        regime (positive GEX, low ER).
+      - Trend: the force that BREAKS both magnets — scaled by ER, State A, negative GEX, surge.
+    The Trend force reinforces whichever LEVEL sits in its direction; the predicted magnet is the
+    level with the higher effective pull. A distribution-based 'touch by close' % for that level
+    is estimated (reflection-principle, driftless) from the remaining 1sigma.
+    HEURISTIC weights — decision support, not a calibrated forecast.
+    """
+    import math
+    gd = gex_data or {}
+    rd = regime_data or {}
+    gex_regime = gd.get("gex_regime")
+    net_gex = gd.get("net_gex") or 0
+    wall = gd.get("gamma_wall_spx") or 0
+    er = rd.get("er_value", 0) or 0
+    state = rd.get("regime_state", "") or ""
+    bias = rd.get("directional_bias", "") or ""
+    surge = bool(surge_data and surge_data.get("surge_type") in ("TREND_SURGE", "VOLATILE_SURGE")
+                 and surge_data.get("fade_multiplier", 0) > 0.3)
+    sigma = (expected_move_data or {}).get("conditional_1sigma") or (expected_move_data or {}).get("expected_1sigma") or 0
+
+    # --- GEX wall strength ---
+    mag = min(1.0, abs(net_gex) / 150_000_000.0)
+    prox = max(0.0, 1.0 - abs(wall - spx_price) / 60.0) if wall else 0.0
+    timef = 0.5 + 0.5 * max(0.0, 1.0 - hours_remaining / 6.5)
+    if gex_regime == "POSITIVE" and wall:
+        gex_strength = 100.0 * mag * (0.5 * prox + 0.5 * timef)
+    else:
+        gex_strength = 100.0 * 0.15 * mag  # negative/neutral: the wall is not an attractor
+
+    # --- RSI-50 mean-reversion strength ---
+    ext = min(1.0, abs(rsi_14 - 50.0) / 25.0)
+    rev_regime = 1.0 if gex_regime == "POSITIVE" else (0.6 if gex_regime in (None, "NEUTRAL", "UNAVAILABLE") else 0.3)
+    er_fade = max(0.2, 1.0 - er / 0.5)
+    rsi_strength = 100.0 * ext * (0.5 * rev_regime + 0.5 * er_fade)
+
+    # --- Trend / continuation strength ---
+    trend_er = min(1.0, er / 0.5)
+    state_a = 1.0 if "STATE A" in state else (0.3 if "STATE B" in state else 0.0)
+    neg_gex = 1.0 if gex_regime == "NEGATIVE" else (0.5 if gex_regime in (None, "NEUTRAL", "UNAVAILABLE") else 0.0)
+    trend_strength = 100.0 * (0.45 * trend_er + 0.25 * state_a + 0.20 * neg_gex + 0.10 * (1.0 if surge else 0.0))
+
+    # int()/bool() coercion below: inputs (rsi_14, er, net_gex) arrive as numpy.float64, so
+    # numpy comparisons/rounds yield numpy types that Pydantic can't serialize. Force natives.
+    forces = [
+        {"name": "GEX Wall", "level": int(round(wall)) if wall else None, "strength": int(round(gex_strength))},
+        {"name": "RSI-50 Mean", "level": int(round(rsi_50_spx)) if rsi_50_spx else None, "strength": int(round(rsi_strength))},
+        {"name": "Trend", "level": None, "strength": int(round(trend_strength))},
+    ]
+
+    # --- Resolve the predicted magnet: Trend reinforces the level in its direction ---
+    trend_dir = "up" if "BULL" in bias else ("down" if "BEAR" in bias else "none")
+    wall_dir = "up" if (wall and wall > spx_price) else "down"
+    rsi_dir = "up" if (rsi_50_spx and rsi_50_spx > spx_price) else "down"
+    pull_wall = gex_strength + (trend_strength if trend_dir == wall_dir else 0.0)
+    pull_rsi = rsi_strength + (trend_strength if trend_dir == rsi_dir else 0.0)
+
+    # Trend "dominant" only when it CLEARLY exceeds both magnets (not a near-tie)
+    trend_dominant = bool(trend_strength >= 55 and trend_strength > 1.3 * gex_strength
+                          and trend_strength > 1.3 * rsi_strength)
+
+    target_level, target_name = None, None
+    if wall and (pull_wall >= pull_rsi or not rsi_50_spx):
+        target_level, target_name = int(round(wall)), "GEX Wall"
+    elif rsi_50_spx:
+        target_level, target_name = int(round(rsi_50_spx)), "RSI-50 Mean"
+
+    touch_prob = None
+    if target_level and sigma > 0:
+        z = abs(target_level - spx_price) / sigma
+        phi = 0.5 * (1.0 + math.erf(z / (2 ** 0.5)))
+        touch_prob = int(round(max(0.0, min(1.0, 2.0 * (1.0 - phi))) * 100 / 5.0) * 5)  # nearest 5%
+
+    if trend_dominant:
+        d = "up" if trend_dir == "up" else "down" if trend_dir == "down" else "through"
+        headline = (f"Trend is the dominant force ({round(trend_strength)}/100) — price likely trends "
+                    f"{d} rather than pinning to a magnet. Fade setups are the weak side.")
+    elif target_level:
+        tp = f" Est. ~{touch_prob}% touch by close." if touch_prob is not None else ""
+        headline = f"Price favored toward {target_level} ({target_name}).{tp}"
+    else:
+        headline = "No clear magnet — mixed pulls."
+
+    return {
+        "forces": forces,
+        "predicted_magnet": "Trend" if trend_dominant else target_name,
+        "predicted_level": None if trend_dominant else target_level,
+        "touch_prob": None if trend_dominant else touch_prob,
+        "trend_dominant": trend_dominant,
+        "headline": headline,
+        "caveat": "Heuristic pull-strengths + a distribution-based touch estimate — decision support, not a calibrated forecast.",
+    }
+
+
+_HEAT_RANK = {"SAFE": 0, "IMBALANCED": 1, "DANGER": 2}
+
+
+def _bump_level(current: str, candidate: str) -> str:
+    """Escalate a heat level, never downgrade."""
+    return candidate if _HEAT_RANK.get(candidate, 0) > _HEAT_RANK.get(current, 0) else current
+
+
+def calculate_portfolio_heat(db_positions, directional_bias: str = "NEUTRAL",
+                             evaluated_positions=None) -> dict:
+    """
+    Portfolio-level risk: (a) same-side concentration, (b) total $-risk vs the account,
+    and (c) any single leg already in danger. Bug C (2026-06-01): heat used to read SAFE
+    purely on put/call balance — so adding an opposite-side leg flipped DANGER→SAFE even
+    though total $-risk rose and one leg was RED. It now factors exposure and per-leg danger,
+    and can never read SAFE while a leg is flagged to close. `evaluated_positions` (optional)
+    carries per-leg moat/escalation; without it, only balance + $-risk are used.
     """
     call_count = sum(1 for p in db_positions if p.type == "Call Spread")
     put_count = sum(1 for p in db_positions if p.type == "Put Spread")
@@ -1196,11 +1415,14 @@ def calculate_portfolio_heat(db_positions, directional_bias: str = "NEUTRAL") ->
         "total": total,
         "warning": None,
         "level": "SAFE",
+        "total_max_loss": None,
+        "pct_of_account": None,
     }
 
     if total == 0:
         return heat
 
+    # ---- (a) Concentration (side balance) ----
     if total >= 2 and call_count == total:
         heat["level"] = "DANGER"
         heat["warning"] = "100% TOP-SIDE EXPOSURE. All positions are Call Spreads. Hedge via Put Spread recommended."
@@ -1215,6 +1437,54 @@ def calculate_portfolio_heat(db_positions, directional_bias: str = "NEUTRAL") ->
         dominant = "Call" if call_count > put_count else "Put"
         heat["level"] = "IMBALANCED"
         heat["warning"] = f"Heavy {dominant} skew ({call_count}C / {put_count}P). Consider balancing exposure."
+
+    # ---- (b) Total $-risk vs account ----
+    total_max_loss = 0.0
+    risk_known = False
+    for p in db_positions:
+        try:
+            credit = float(getattr(p, "credit", 0) or 0)
+            contracts = int(getattr(p, "contracts", 1) or 1)
+        except (TypeError, ValueError):
+            continue  # mock/unknown position — skip $-risk for it
+        ml = max(0.0, SPREAD_WIDTH_SPX - credit) * 100.0 * contracts
+        if ml > 0:
+            total_max_loss += ml
+            risk_known = True
+
+    if risk_known:
+        heat["total_max_loss"] = round(total_max_loss, 0)
+        if ACCOUNT_SIZE:
+            heat["pct_of_account"] = round(total_max_loss / ACCOUNT_SIZE * 100.0, 1)
+        pct_str = f" = {heat['pct_of_account']:.0f}% of account" if heat["pct_of_account"] is not None else ""
+        risk_note = None
+        if total_max_loss >= MAX_RISK_PER_TRADE:
+            heat["level"] = _bump_level(heat["level"], "DANGER")
+            risk_note = f"Total book risk ${total_max_loss:,.0f}{pct_str} — over the ${MAX_RISK_PER_TRADE:,.0f} ceiling."
+        elif total_max_loss >= MAX_RISK_WARN:
+            heat["level"] = _bump_level(heat["level"], "IMBALANCED")
+            risk_note = f"Total book risk ${total_max_loss:,.0f}{pct_str} — above the ${MAX_RISK_WARN:,.0f} warn line."
+        if risk_note:
+            heat["warning"] = f"{heat['warning']} {risk_note}" if heat["warning"] else risk_note
+
+    # ---- (c) Any single leg already in danger → never SAFE ----
+    if evaluated_positions:
+        DANGER_ESC = {"CLOSE_RECOMMENDED", "URGENT_CLOSE", "CRITICAL_EJECT"}
+        DANGER_ACT = {"CLOSE_NOW", "CLOSE_SOON", "URGENT_CLOSE", "CRITICAL_EJECT"}
+        hot = 0
+        for ep in evaluated_positions:
+            if not isinstance(ep, dict):
+                continue
+            es = ep.get("exit_strategy") or {}
+            m = ep.get("moat")
+            if (es.get("escalation_level") in DANGER_ESC
+                    or es.get("action") in DANGER_ACT
+                    or (isinstance(m, (int, float)) and m <= WARNING_ZONE_THRESHOLD)):
+                hot += 1
+        if hot:
+            heat["level"] = _bump_level(heat["level"], "DANGER")
+            leg_note = f"{hot} position(s) in the danger zone — the book is not 'safe' while a leg is flagged to close."
+            heat["warning"] = f"{heat['warning']} {leg_note}" if heat["warning"] else leg_note
 
     return heat
 
@@ -1746,36 +2016,44 @@ def evaluate_positions(db_positions, spx_price: float, db_session,
         # Call wall = resistance ceiling (good if BELOW our call strike).
         gex_context = None
         if gex_data and gex_data.get("gex_regime") not in (None, "UNAVAILABLE"):
+            gex_regime = gex_data.get("gex_regime")
             put_wall_spx = gex_data.get("put_wall_spx", 0)
             call_wall_spx = gex_data.get("call_wall_spx", 0)
             gamma_wall_spx = gex_data.get("gamma_wall_spx", 0)
 
-            if pos.type == "Put Spread":
-                # For short put spread: put wall ABOVE strike = support protects us
-                dist_to_put_wall = abs(pos.strike - put_wall_spx)
-                if dist_to_put_wall < 15 and put_wall_spx > 0:
-                    if put_wall_spx > pos.strike:
-                        # Put wall is ABOVE our strike — dealers support price before reaching us
-                        gex_context = f"Put wall at {put_wall_spx} SPX — floor {dist_to_put_wall:.0f} pts above strike. GEX protects this position."
-                    else:
-                        # Put wall is AT or BELOW our strike — no support above us
-                        gex_context = f"Put wall ({put_wall_spx}) at/below strike — no GEX floor protecting position."
-                elif spx_price < gamma_wall_spx and gamma_wall_spx > 0:
-                    # Price below gamma wall = magnet pulling price back up = good for short puts
-                    gex_context = f"Gamma wall {gamma_wall_spx} above SPX — magnet pulls price up, reduces downside risk."
-            elif pos.type == "Call Spread":
-                # For short call spread: call wall BELOW strike = resistance protects us
-                dist_to_call_wall = abs(pos.strike - call_wall_spx)
-                if dist_to_call_wall < 15 and call_wall_spx > 0:
-                    if call_wall_spx < pos.strike:
-                        # Call wall is BELOW our strike — dealers resist price before reaching us
-                        gex_context = f"Call wall at {call_wall_spx} SPX — ceiling {dist_to_call_wall:.0f} pts below strike. GEX protects this position."
-                    else:
-                        # Call wall is AT or ABOVE our strike — no resistance below us
-                        gex_context = f"Call wall ({call_wall_spx}) at/above strike — no GEX ceiling protecting position."
-                elif spx_price > gamma_wall_spx and gamma_wall_spx > 0:
-                    # Price above gamma wall = magnet pulling price back down = good for short calls
-                    gex_context = f"Gamma wall {gamma_wall_spx} below SPX — magnet pulls price down, reduces upside risk."
+            if gex_regime == "NEGATIVE":
+                # Bug A (2026-06-01): dealer SHORT gamma AMPLIFIES moves — the gamma
+                # "magnet" does NOT hold and walls are unreliable. Never claim wall/magnet
+                # protection here; the reassuring "magnet pulls price ..." text is wrong
+                # under negative GEX (it kept showing on the 6/1 puts while GEX was negative).
+                gex_context = "Negative GEX (dealer short gamma) — moves amplified, walls unreliable; no magnet support."
+            elif gex_regime == "POSITIVE":
+                if pos.type == "Put Spread":
+                    # For short put spread: put wall ABOVE strike = support protects us
+                    dist_to_put_wall = abs(pos.strike - put_wall_spx)
+                    if dist_to_put_wall < 15 and put_wall_spx > 0:
+                        if put_wall_spx > pos.strike:
+                            # Put wall is ABOVE our strike — dealers support price before reaching us
+                            gex_context = f"Put wall at {put_wall_spx} SPX — floor {dist_to_put_wall:.0f} pts above strike. GEX protects this position."
+                        else:
+                            # Put wall is AT or BELOW our strike — no support above us
+                            gex_context = f"Put wall ({put_wall_spx}) at/below strike — no GEX floor protecting position."
+                    elif spx_price < gamma_wall_spx and gamma_wall_spx > 0:
+                        # Price below gamma wall = magnet pulling price back up = good for short puts
+                        gex_context = f"Gamma wall {gamma_wall_spx} above SPX — magnet pulls price up, reduces downside risk."
+                elif pos.type == "Call Spread":
+                    # For short call spread: call wall BELOW strike = resistance protects us
+                    dist_to_call_wall = abs(pos.strike - call_wall_spx)
+                    if dist_to_call_wall < 15 and call_wall_spx > 0:
+                        if call_wall_spx < pos.strike:
+                            # Call wall is BELOW our strike — dealers resist price before reaching us
+                            gex_context = f"Call wall at {call_wall_spx} SPX — ceiling {dist_to_call_wall:.0f} pts below strike. GEX protects this position."
+                        else:
+                            # Call wall is AT or ABOVE our strike — no resistance below us
+                            gex_context = f"Call wall ({call_wall_spx}) at/above strike — no GEX ceiling protecting position."
+                    elif spx_price > gamma_wall_spx and gamma_wall_spx > 0:
+                        # Price above gamma wall = magnet pulling price back down = good for short calls
+                        gex_context = f"Gamma wall {gamma_wall_spx} below SPX — magnet pulls price down, reduces upside risk."
 
             # Append GEX context to message if we have useful info
             if gex_context:
@@ -1881,7 +2159,7 @@ def evaluate_positions(db_positions, spx_price: float, db_session,
 
         # Graduated escalation: track how long position has been in danger
         in_danger = moat <= WARNING_ZONE_THRESHOLD
-        esc = _get_escalation_level(pos.id, in_danger)
+        esc = _get_escalation_level(pos.id, in_danger, moat=moat)
         esc_level = esc["level"]
 
         if moat <= 0:
@@ -2074,8 +2352,26 @@ def evaluate_positions(db_positions, spx_price: float, db_session,
         _gex_regime = gex_data.get("gex_regime") if gex_data else None
         _surge_active = bool(surge_data and surge_data.get("surge_type") == "TREND_SURGE"
                              and surge_data.get("fade_multiplier", 0) > 0.3)
-        mean_reverting = (_gex_regime == "POSITIVE") and not _surge_active
-        trend_continuation = (_gex_regime == "NEGATIVE") or _surge_active
+        # Bug D (2026-06-01): positive GEX is mean-reversion PROTECTION for this position only
+        # if the gamma magnet pulls price AWAY from its short strike. A short option sitting
+        # between spot and the gamma wall is pulled TOWARD its strike (the 6/1 7605 call below
+        # the 7617 wall) — there, positive GEX is the enemy, not a cushion. Gate on side so P0-2
+        # won't treat a magnet-threatened leg as safe-to-hold.
+        _gamma_wall = (gex_data.get("gamma_wall_spx") if gex_data else 0) or 0
+        _magnet_protects = True
+        if _gex_regime == "POSITIVE" and _gamma_wall > 0:
+            # Protective when the magnet sits between spot and the short strike (it pins price
+            # short of the strike). Harmful when the magnet is on the far side of the strike
+            # (it drags price through it — the 6/1 7605 call with the wall at 7617).
+            if pos.type == "Put Spread":
+                _magnet_protects = bool(_gamma_wall > pos.strike)   # wall = floor ABOVE the short put
+            elif pos.type == "Call Spread":
+                _magnet_protects = bool(_gamma_wall < pos.strike)   # wall = ceiling BELOW the short call
+        # bool() coercion: gamma_wall/strike can be numpy.float64 → comparison yields numpy.bool_,
+        # which Pydantic cannot serialize (crashed serialize_response on 2026-06-01). Force natives.
+        mean_reverting = bool((_gex_regime == "POSITIVE") and not _surge_active and _magnet_protects)
+        trend_continuation = bool((_gex_regime == "NEGATIVE") or _surge_active
+                                  or (_gex_regime == "POSITIVE" and not _magnet_protects))
 
         # P0-2a: outside a mean-reverting regime, never show a HOLD action while the
         # escalation ladder is at URGENT/CRITICAL. Fixes the final-hour action/escalation
@@ -3373,13 +3669,29 @@ def generate_market_insights(
         day_range = round(day_high_spx - day_low_spx, 0) if day_high_spx and day_low_spx else 0
         direction = "rise" if pos["type"] == "Call Spread" else "drop"
         context = f"SPX needs to {direction} {moat:.0f} pts to reach your strike."
-        if day_range > 0:
-            if moat > day_range:
-                context += f" Today's entire range is only {day_range:.0f} pts — very unlikely."
-            elif moat > day_range * 0.5:
-                context += f" That's {moat/day_range*100:.0f}% of today's {day_range:.0f}-pt range."
+        # Bug B (2026-06-01): gauge likelihood against the REMAINING-session expected move
+        # (1sigma), NOT the realized-so-far range. Early in the day that range is tiny and
+        # produced a false "very unlikely" even on RED positions (the 6/1 cards). Also never
+        # call a breach "unlikely" while the card is RED.
+        sigma = 0
+        if expected_move_data:
+            sigma = expected_move_data.get("conditional_1sigma") or expected_move_data.get("expected_1sigma") or 0
+        if light == "RED":
+            context += " Strike is within reach — the system flags this position for closing."
+        elif sigma > 0:
+            ratio = moat / sigma
+            if ratio >= 1.5:
+                context += f" That's {ratio:.1f}x the expected move left today (+/-{sigma:.0f} pts) — unlikely."
+            elif ratio >= 0.75:
+                context += f" That's ~{ratio*100:.0f}% of the expected move left today (+/-{sigma:.0f} pts) — possible; stay alert."
             else:
-                context += f" That's within today's {day_range:.0f}-pt range — stay alert."
+                context += f" Only ~{ratio*100:.0f}% of the expected move left today (+/-{sigma:.0f} pts) — within reach."
+        elif day_range > 0:
+            # Fallback when expected-move data is unavailable
+            if moat > day_range:
+                context += f" That's more than today's {day_range:.0f}-pt range so far — but the day isn't over."
+            else:
+                context += f" That's {moat/day_range*100:.0f}% of today's {day_range:.0f}-pt range — stay alert."
 
         # GEX wall proximity for this position
         gex_proximity = None

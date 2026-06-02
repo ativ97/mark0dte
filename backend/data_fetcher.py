@@ -386,14 +386,16 @@ def fetch_alpaca_market_data(symbol: str = "SPY"):
             logger.error(f"Alpaca Bars API Error: Status {bars_res.status_code} - Response: {bars_res.text}")
             return None, None
 
-        bars_data = bars_res.json().get('bars', [])
-        logger.info(f"Successfully retrieved {len(bars_data)} bars from Alpaca.")
+        # pitfall #12: Alpaca returns {"bars": null} on a no-data window (weekend / pre-market),
+        # so `.get('bars', [])` yields None (key exists) and len() crashes. Coerce None -> [].
+        bars_data = bars_res.json().get('bars') or []
         if not bars_data:
-            logger.warning("Retrieved bars list is empty!")
+            logger.warning("Alpaca returned 200 but no bars (market closed / no data for window). Returning gracefully.")
             return None, None
+        logger.info(f"Successfully retrieved {len(bars_data)} bars from Alpaca.")
 
     except Exception as e:
-        logger.exception("Failed to establish connection to Alpaca Bars API")
+        logger.exception("Failed to fetch/parse Alpaca Bars response")
         return None, None
 
     # Convert Alpaca JSON into a Pandas DataFrame

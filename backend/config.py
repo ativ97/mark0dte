@@ -127,5 +127,14 @@ MAX_RISK_WARN = ACCOUNT_SIZE * MAX_RISK_WARN_PCT            # = $3,750 (amber no
 MAX_RISK_PER_TRADE = ACCOUNT_SIZE * MAX_RISK_PER_TRADE_PCT  # = $7,500 (reference only)
 MAX_RISK_PER_DAY_PCT = 0.30       # suggested daily stop (cumulative realized loss); guidance only, not enforced
 
+# --- GEX REGIME HYSTERESIS (2026-06-01) ---
+# Deadband around net_gex = 0. The GEX regime only FLIPS sign when |net_gex| crosses this
+# band; within the band the previous regime sticks. Stops the moat / P0-2 whipsaw seen 6/1,
+# when net GEX hovered near zero and flipped POSITIVE<->NEGATIVE ~6x, swinging the recommended
+# moat 75 -> 104 -> 58 -> 89 -> 77 in minutes. Units = raw net gamma (same scale as
+# gex_data['net_gex']; 6/1 noise was within +/-26M, the strong open read was +172M).
+# TUNE after watching live — raise it if the regime still flickers, lower it if it's too slow.
+GEX_REGIME_BAND = 20_000_000.0
+
 # --- VALID POSITION TYPES ---
 VALID_POSITION_TYPES = ["Put Spread", "Call Spread", "Iron Condor"]

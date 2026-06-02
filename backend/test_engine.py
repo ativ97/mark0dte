@@ -184,6 +184,30 @@ class TestPortfolioHeat(unittest.TestCase):
         self.assertEqual(result["level"], "SAFE")
         self.assertIsNone(result["warning"])
 
+    def test_high_total_risk_bumps_level(self):
+        """Bug C: balanced sides but total $-risk over the ceiling = DANGER (exposure, not just balance)."""
+        from engine import calculate_portfolio_heat
+        from types import SimpleNamespace
+        positions = [SimpleNamespace(type="Call Spread", credit=0.50, contracts=20),
+                     SimpleNamespace(type="Put Spread", credit=0.50, contracts=20)]
+        result = calculate_portfolio_heat(positions)
+        self.assertEqual(result["level"], "DANGER")
+        self.assertIsNotNone(result["total_max_loss"])
+        self.assertGreater(result["total_max_loss"], 7500)
+
+    def test_red_leg_blocks_safe(self):
+        """Bug C: a balanced, small book can't read SAFE while a leg is flagged to close."""
+        from engine import calculate_portfolio_heat
+        from types import SimpleNamespace
+        positions = [SimpleNamespace(type="Call Spread", credit=0.50, contracts=1),
+                     SimpleNamespace(type="Put Spread", credit=0.50, contracts=1)]
+        evaluated = [{"type": "Call Spread", "moat": 8.0,
+                      "exit_strategy": {"escalation_level": "CRITICAL_EJECT", "action": "CLOSE_SOON"}},
+                     {"type": "Put Spread", "moat": 40.0,
+                      "exit_strategy": {"escalation_level": "SAFE", "action": "HOLD"}}]
+        result = calculate_portfolio_heat(positions, evaluated_positions=evaluated)
+        self.assertNotEqual(result["level"], "SAFE")
+
 
 class TestReversalScore(unittest.TestCase):
     """C2: Reversal score should suppress false EJECT signals."""
@@ -231,6 +255,116 @@ class TestReversalScore(unittest.TestCase):
         pos = result[0]
         self.assertFalse(pos["exit_strategy"].get("reversal_downgrade", False))
         self.assertLess(pos["reversal_score"], 50)
+
+
+class TestGexHysteresisAndSideAware(unittest.TestCase):
+    """2026-06-01: GEX regime deadband + side-aware mean_reverting + mean-reversion read."""
+
+    def test_stabilize_flips_only_past_band(self):
+        from engine import stabilize_gex_regime
+        self.assertEqual(stabilize_gex_regime(50_000_000, None), "POSITIVE")
+        self.assertEqual(stabilize_gex_regime(-50_000_000, None), "NEGATIVE")
+
+    def test_stabilize_sticky_within_band(self):
+        from engine import stabilize_gex_regime
+        # within the +/-20M deadband: hold the previous strong regime instead of flipping
+        self.assertEqual(stabilize_gex_regime(1_000_000, "POSITIVE"), "POSITIVE")
+        self.assertEqual(stabilize_gex_regime(-6_000_000, "POSITIVE"), "POSITIVE")
+        self.assertEqual(stabilize_gex_regime(1_000_000, None), "NEUTRAL")
+
+    def test_mean_reversion_on_off(self):
+        from engine import mean_reversion_status
+        on = mean_reversion_status({"gex_regime": "POSITIVE"},
+                                   {"regime_state": "STATE B: MODERATE CHOP", "er_value": 0.2}, None)
+        self.assertTrue(on["on"])
+        off = mean_reversion_status({"gex_regime": "NEGATIVE"},
+                                    {"regime_state": "STATE C", "er_value": 0.5}, None)
+        self.assertFalse(off["on"])
+
+    def test_side_aware_call_below_magnet_not_protected(self):
+        """Bug D: a short call BELOW the gamma magnet (wall above strike) is NOT mean-reverting-
+        protected even in positive GEX — the magnet drags price toward the strike (6/1 7605 call)."""
+        from engine import evaluate_positions, clear_rec_state
+        from unittest.mock import MagicMock
+        clear_rec_state()
+        pos = MagicMock()
+        pos.id = 77; pos.type = "Call Spread"; pos.strike = 7605.0
+        pos.credit = 0.65; pos.contracts = 10; pos.breach_start_time = None
+        gex = {"gex_regime": "POSITIVE", "gamma_wall_spx": 7617, "put_wall_spx": 7517,
+               "call_wall_spx": 7617, "net_gex": 80_000_000}
+        result = evaluate_positions(
+            [pos], 7580.0, MagicMock(),
+            regime_score=1, effective_moat_min=50, directional_bias="BULLISH",
+            range_position=50.0, hours_remaining=4.0, momentum_label="MILD DRIFT UP",
+            gex_data=gex, rsi_14=60.0, er_value=0.3,
+        )
+        self.assertFalse(result[0]["mean_reverting"])
+        self.assertTrue(result[0]["trend_continuation"])
+
+    def test_rsi_50_price_below_when_overbought(self):
+        from engine import compute_rsi_50_price
+        closes = [100 + i for i in range(30)]   # steady uptrend → RSI>50 → target BELOW last close
+        p = compute_rsi_50_price(closes)
+        self.assertIsNotNone(p)
+        self.assertLess(p, closes[-1])
+
+    def test_rsi_50_price_above_when_oversold(self):
+        from engine import compute_rsi_50_price
+        closes = [100 - i for i in range(30)]   # steady downtrend → RSI<50 → target ABOVE last close
+        p = compute_rsi_50_price(closes)
+        self.assertIsNotNone(p)
+        self.assertGreater(p, closes[-1])
+
+    def test_rsi_50_price_insufficient_data(self):
+        from engine import compute_rsi_50_price
+        self.assertIsNone(compute_rsi_50_price([100, 101, 102]))
+
+    def test_magnet_forces_wall_favored_positive_gex(self):
+        from engine import compute_magnet_forces
+        r = compute_magnet_forces(
+            spx_price=7595.0,
+            gex_data={"gex_regime": "POSITIVE", "net_gex": 100e6, "gamma_wall_spx": 7617.0},
+            rsi_14=66.0,
+            regime_data={"er_value": 0.35, "regime_state": "STATE A: TRENDING", "directional_bias": "BULLISH"},
+            expected_move_data={"conditional_1sigma": 45.0},
+            rsi_50_spx=7580.0, hours_remaining=3.0,
+        )
+        self.assertFalse(r["trend_dominant"])
+        self.assertEqual(r["predicted_magnet"], "GEX Wall")
+        self.assertEqual(r["predicted_level"], 7617)
+        self.assertTrue(0 <= r["touch_prob"] <= 100)
+
+    def test_magnet_forces_trend_dominant_negative_gex(self):
+        from engine import compute_magnet_forces
+        r = compute_magnet_forces(
+            spx_price=7480.0,
+            gex_data={"gex_regime": "NEGATIVE", "net_gex": -90e6, "gamma_wall_spx": 7520.0},
+            rsi_14=28.0,
+            regime_data={"er_value": 0.62, "regime_state": "STATE A: TRENDING", "directional_bias": "BEARISH"},
+            expected_move_data={"conditional_1sigma": 50.0},
+            rsi_50_spx=7500.0, hours_remaining=2.0,
+        )
+        self.assertTrue(r["trend_dominant"])
+        self.assertEqual(r["predicted_magnet"], "Trend")
+        self.assertIsNone(r["predicted_level"])
+
+    def test_magnet_forces_returns_native_types(self):
+        """Regression (2026-06-01 serialization crash): numpy.float64 inputs must yield NATIVE
+        Python types — Pydantic cannot serialize numpy.bool_/float64 (crashed serialize_response)."""
+        import numpy as np
+        from engine import compute_magnet_forces
+        r = compute_magnet_forces(
+            spx_price=np.float64(7595.0),
+            gex_data={"gex_regime": "POSITIVE", "net_gex": np.float64(100e6), "gamma_wall_spx": np.float64(7617.0)},
+            rsi_14=np.float64(66.0),
+            regime_data={"er_value": np.float64(0.35), "regime_state": "STATE A: TRENDING", "directional_bias": "BULLISH"},
+            expected_move_data={"conditional_1sigma": np.float64(45.0)},
+            rsi_50_spx=np.float64(7580.0), hours_remaining=np.float64(3.0),
+        )
+        self.assertIsInstance(r["trend_dominant"], bool)
+        self.assertNotIsInstance(r["trend_dominant"], np.generic)
+        for f in r["forces"]:
+            self.assertIsInstance(f["strength"], int)
 
 
 class TestTimeAdjustedTakeProfit(unittest.TestCase):
@@ -700,6 +834,22 @@ class TestSignalOutcomeTracker(unittest.TestCase):
             "realized_pl": 0.55,  # final_cost = 0.05
             "close_reason": "manual",
             "worst_moat_after": 5.0,  # Hit gamma trap!
+        }
+        result = _grade_signal(signal)
+        self.assertEqual(result["signal_grade"], "JUSTIFIED")
+
+    def test_exit_signal_justified_when_over_cap(self):
+        """2026-06-01: EXIT is JUSTIFIED (not PREMATURE) when the position was over the sizing
+        cap, even if it recovered and never entered the warning zone."""
+        from accuracy_tracker import _grade_signal
+        signal = {
+            "is_exit_signal": True,
+            "buyback_at_signal": 0.20,
+            "credit": 0.60,
+            "realized_pl": 0.55,  # final_cost = 0.05 (recovered)
+            "close_reason": "manual",
+            "worst_moat_after": 40.0,  # never entered the warning zone
+            "over_limit_at_signal": True,
         }
         result = _grade_signal(signal)
         self.assertEqual(result["signal_grade"], "JUSTIFIED")
