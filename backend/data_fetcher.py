@@ -5,7 +5,7 @@ import requests
 import yfinance as yf
 from datetime import datetime, date, timezone
 from scipy.stats import norm
-from config import BASE_DATA_URL, HEADERS, SPX_PROXY_MULTIPLIER, logger, THETA_EMAIL, THETA_PASSWORD
+from config import BASE_DATA_URL, HEADERS, SPX_PROXY_MULTIPLIER, logger, THETA_EMAIL, THETA_PASSWORD, TA_REGULAR_HOURS_ONLY
 
 # --- SPX LIVE PRICE CACHE ---
 _spx_cache = {"price": None, "fetched_at": None}
@@ -368,6 +368,87 @@ def fetch_realized_move_distribution(lookback_days: int = 120) -> dict:
         return {"available": False}
 
 
+_spx_bars_cache = {"data": None, "fetched_at": None}
+SPX_BARS_TTL_SECONDS = 60
+
+
+def fetch_spx_intraday_bars(period: str = "5d", interval: str = "5m"):
+    """Fetch SPX index (^GSPC) intraday bars from Yahoo for SPX-native RSI — so the engine's RSI
+    matches the SPX chart the user trades rather than the SPY proxy. ^GSPC is regular-hours-only
+    (the index doesn't trade pre/post), which is exactly what we want. Cached ~60s to avoid
+    hammering Yahoo / adding latency. Returns a DataFrame with a 'Close' column (tz-aware index)
+    or None on any failure (the caller then keeps the SPY-based RSI)."""
+    global _spx_bars_cache
+    now = datetime.now(timezone.utc)
+    c = _spx_bars_cache
+    if (c["data"] is not None and c["fetched_at"] is not None
+            and (now - c["fetched_at"]).total_seconds() < SPX_BARS_TTL_SECONDS):
+        return c["data"]
+    try:
+        hist = yf.Ticker("^GSPC").history(period=period, interval=interval)
+        if hist is None or len(hist) == 0 or "Close" not in getattr(hist, "columns", []):
+            logger.warning("SPX intraday bars: empty/invalid response from Yahoo")
+            return c["data"]  # stale cache (possibly None)
+        c["data"] = hist
+        c["fetched_at"] = now
+        logger.info(f"SPX intraday bars: {len(hist)} ^GSPC {interval} bars (RTH index)")
+        return hist
+    except Exception as e:
+        logger.warning(f"SPX intraday bars fetch failed: {e}")
+        return c["data"]  # stale cache or None
+
+
+def _align_rsi_to_index(rsi_series, target_index, tolerance_min: int = 8):
+    """Map an SPX (^GSPC) RSI series onto the SPY df's index by FORWARD-FILL: each SPY bar takes the
+    most recent SPX RSI at-or-before its timestamp, so the LATEST SPY bar always gets the latest
+    available SPX RSI. (2026-06-04: nearest-within-tolerance failed because the Alpaca SPY df is
+    today-only / pre-market-heavy and only ~15 regular-hours bars overlapped the ^GSPC RTH grid →
+    < 30 matches → it bailed to the SPY RSI. Forward-fill is robust to that mismatch.) Both indexes
+    are normalized to UTC for matching; the result carries `target_index`. NaN only for SPY bars that
+    precede the very first SPX bar (caller keeps the SPY RSI there). Returns None if unusable.
+    `tolerance_min` is retained for signature compatibility but unused by the ffill mapping."""
+    try:
+        if rsi_series is None or len(rsi_series) == 0:
+            return None
+        s = rsi_series.dropna()
+        if s.empty:
+            return None
+        s = s.copy()
+        sidx = s.index
+        s.index = sidx.tz_localize("UTC") if sidx.tz is None else sidx.tz_convert("UTC")
+        s = s.sort_index()
+        tgt_utc = target_index.tz_localize("UTC") if target_index.tz is None else target_index.tz_convert("UTC")
+        aligned = s.reindex(tgt_utc, method="ffill")
+        aligned.index = target_index
+        return aligned
+    except Exception as e:
+        logger.warning(f"SPX RSI alignment failed: {e}")
+        return None
+
+
+def _filter_to_rth(df, min_bars: int = 50):
+    """Keep only Regular Trading Hours bars (09:30–16:00 ET) so TA matches a standard RTH chart.
+    The raw Alpaca SPY series includes pre/after-market bars, which smear the overnight gap across
+    many small bars and pushed RSI ~20 pts off the SPX RTH chart on the 2026-06-04 gap day (engine
+    SPY 66 vs Robinhood SPX 45; engine SPY exactly matched Robinhood SPY). RTH-only SPY ≈ the SPX
+    index during the session. Falls back to the full df if filtering would leave < min_bars (so
+    indicators never starve on a data hiccup). The index tz is preserved."""
+    if df is None or len(df) == 0:
+        return df
+    try:
+        idx = df.index
+        idx_utc = idx.tz_localize("UTC") if idx.tz is None else idx
+        et = idx_utc.tz_convert("America/New_York")
+        pos = et.indexer_between_time("09:30", "16:00", include_end=False)
+    except Exception as e:
+        logger.warning(f"RTH filter skipped (tz handling): {e}")
+        return df
+    if len(pos) < min_bars:
+        logger.warning(f"RTH filter would leave {len(pos)} bars (<{min_bars}); keeping full series")
+        return df
+    return df.iloc[pos]
+
+
 def fetch_alpaca_market_data(symbol: str = "SPY"):
     """
     Fetches 5-min historical bars for TA calculation AND the live sub-second trade tick.
@@ -405,6 +486,14 @@ def fetch_alpaca_market_data(symbol: str = "SPY"):
               inplace=True)
     df['Date'] = pd.to_datetime(df['Date'])
     df.set_index('Date', inplace=True)
+
+    # 2026-06-04: restrict TA to Regular Trading Hours so RSI/EMA/CHOP/ER track a standard RTH
+    # chart (≈ the SPX index you trade) instead of being smeared by SPY pre/after-market bars.
+    # Kill-switch: config.TA_REGULAR_HOURS_ONLY = False reverts to the full all-session series.
+    if TA_REGULAR_HOURS_ONLY:
+        _n0 = len(df)
+        df = _filter_to_rth(df)
+        logger.info(f"RTH filter applied: {_n0} → {len(df)} bars (regular hours only)")
 
     # 2. Fetch the absolute Latest Trade for sub-second accuracy
     trade_url = f"{BASE_DATA_URL}/{symbol}/trades/latest"
@@ -495,6 +584,156 @@ def _bs_gamma(spot: float, strike: float, iv: float, t_years: float, r: float = 
         return gamma
     except (ZeroDivisionError, ValueError):
         return 0.0
+
+
+def _compute_zero_gamma(levels, spot=None):
+    """
+    Compute the zero-gamma / gamma-flip level: the price where CUMULATIVE signed
+    dealer GEX crosses zero (the boundary between the POSITIVE and NEGATIVE regimes).
+
+    `levels` is an iterable of (strike, signed_gex) pairs (any units, same sign
+    convention as fetch_gex_data: calls +, puts -). `spot` is optional and only
+    used to disambiguate when there are multiple zero crossings (we pick the
+    crossing nearest spot).
+
+    Method: sort strikes low→high, walk accumulating signed GEX, find adjacent
+    strikes where the running cumulative changes sign, and linear-interpolate the
+    price where the cumulative would equal zero. Returns the flip price in the
+    SAME units as the input strikes (caller scales SPY→SPX), or None.
+
+    Robustness: returns None for empty / single-strike / fully one-sided profiles
+    (no crossing). If the cumulative is exactly zero at a strike, that strike is
+    returned. If multiple crossings exist, the one closest to `spot` is chosen
+    (falls back to the first crossing when spot is None).
+    """
+    # Coerce + clean: keep only finite (strike, gex) pairs
+    pts = []
+    for item in (levels or []):
+        try:
+            k = float(item[0])
+            g = float(item[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if math.isfinite(k) and math.isfinite(g):
+            pts.append((k, g))
+
+    if len(pts) < 2:
+        return None
+
+    # Sort by strike ascending and aggregate duplicate strikes (defensive)
+    pts.sort(key=lambda p: p[0])
+    agg = []
+    for k, g in pts:
+        if agg and agg[-1][0] == k:
+            agg[-1][1] += g
+        else:
+            agg.append([k, g])
+    if len(agg) < 2:
+        return None
+
+    # Build the running cumulative signed GEX low→high
+    cum = 0.0
+    cum_pts = []  # (strike, cumulative_after_this_strike)
+    for k, g in agg:
+        cum += g
+        cum_pts.append((k, cum))
+
+    # If the cumulative never changes sign, there is no flip level.
+    # (Includes the fully one-sided case: all puts or all calls.)
+    crossings = []  # list of interpolated flip strikes
+    for i in range(1, len(cum_pts)):
+        k0, c0 = cum_pts[i - 1]
+        k1, c1 = cum_pts[i]
+        if c0 == 0.0:
+            crossings.append(k0)
+            continue
+        # Sign change between adjacent cumulative samples → bracketed zero
+        if (c0 < 0.0 < c1) or (c0 > 0.0 > c1):
+            denom = (c1 - c0)
+            frac = (0.0 - c0) / denom if denom != 0 else 0.0
+            frac = min(max(frac, 0.0), 1.0)
+            crossings.append(k0 + frac * (k1 - k0))
+    # Catch a terminal exact-zero cumulative not handled above
+    if cum_pts[-1][1] == 0.0:
+        crossings.append(cum_pts[-1][0])
+
+    if not crossings:
+        return None
+
+    # De-dup near-identical crossings, then pick the one nearest spot
+    crossings = sorted(set(round(c, 6) for c in crossings))
+    if spot is not None and math.isfinite(spot):
+        flip = min(crossings, key=lambda c: abs(c - float(spot)))
+    else:
+        flip = crossings[0]
+    return float(flip)
+
+
+def _compute_gamma_flip(chain, t_years, spot, r: float = 0.05, span: float = 0.10, steps: int = 200):
+    """
+    Proper zero-gamma / gamma-flip level: the SPOT price at which NET dealer GEX
+    crosses zero, found by RE-COMPUTING net GEX as a function of spot (BS gamma
+    depends on spot) over a grid and interpolating the zero nearest the current spot.
+
+    This supersedes `_compute_zero_gamma` (cumulative signed GEX *across strikes*),
+    which was sign-inconsistent with net_gex — the 2026-06-03 bug where the flip read
+    ~6900 while spot was ~7560 and net_gex was NEGATIVE, violating the regime invariant.
+
+    `chain`: iterable of (strike, iv, open_interest, sign) with sign=+1 calls / -1 puts,
+    in the SAME price units as `spot` (SPY here). Returns the flip in those units, or
+    None when net GEX does not change sign across the scanned band (one-sided book).
+
+    By construction net GEX rises through the flip, so this yields the standard
+    convention the caller asserts: spot ABOVE flip => positive GEX (mean-reverting),
+    spot BELOW flip => negative GEX (trending).
+    """
+    if not chain or spot is None or not math.isfinite(spot) or spot <= 0 or t_years <= 0:
+        return None
+    legs = []
+    for item in (chain or []):
+        try:
+            k = float(item[0]); iv = float(item[1]); oi = float(item[2]); sg = float(item[3])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if k > 0 and iv > 0 and oi > 0 and math.isfinite(k) and math.isfinite(iv):
+            legs.append((k, iv, oi, sg))
+    if len(legs) < 2:
+        return None
+
+    INV_SQRT_2PI = 0.3989422804014327  # 1/sqrt(2*pi); npdf(x)=INV_SQRT_2PI*exp(-x^2/2) == norm.pdf
+    sqrt_t = math.sqrt(t_years)
+
+    def _net_gex_at(S):
+        if S <= 0:
+            return 0.0
+        total = 0.0
+        for k, iv, oi, sg in legs:
+            denom = iv * sqrt_t
+            if denom <= 0:
+                continue
+            d1 = (math.log(S / k) + (r + 0.5 * iv * iv) * t_years) / denom
+            gamma = (INV_SQRT_2PI * math.exp(-0.5 * d1 * d1)) / (S * denom)
+            total += gamma * oi * 100.0 * S * sg
+        return total
+
+    lo = spot * (1.0 - span)
+    hi = spot * (1.0 + span)
+    step = (hi - lo) / steps
+    prev_s = lo
+    prev_v = _net_gex_at(lo)
+    crossings = []
+    for i in range(1, steps + 1):
+        s = lo + i * step
+        v = _net_gex_at(s)
+        if prev_v == 0.0:
+            crossings.append(prev_s)
+        elif (prev_v < 0.0 < v) or (prev_v > 0.0 > v):
+            frac = (0.0 - prev_v) / (v - prev_v)
+            crossings.append(prev_s + frac * (s - prev_s))
+        prev_s, prev_v = s, v
+    if not crossings:
+        return None
+    return float(min(crossings, key=lambda c: abs(c - spot)))
 
 
 def fetch_gex_data(spy_price: float = None, spx_spy_ratio: float = 10.0) -> dict | None:
@@ -638,6 +877,25 @@ def fetch_gex_data(spy_price: float = None, spx_spy_ratio: float = 10.0) -> dict
             gex_regime = "NEUTRAL"
             gex_regime_label = "Balanced Gamma"
 
+        # Zero-gamma / flip level: the SPOT where NET dealer GEX crosses zero, recomputed
+        # vs spot (BS gamma depends on spot). Replaces the old cumulative-by-strike method,
+        # which was sign-inconsistent with net_gex (2026-06-03 bug). Built from the live
+        # chain (strike, IV, OI, sign), in SPY units, then scaled to SPX.
+        flip_chain = [
+            (float(row["strike"]), float(row["implied_vol"]), int(row["open_interest"]),
+             1.0 if row["right"] == "CALL" else -1.0)
+            for _, row in merged.iterrows()
+        ]
+        zero_gamma_spy_val = _compute_gamma_flip(flip_chain, t_years, spy_price)
+        # Invariant guard: only surface a flip consistent with the current regime
+        # (spot > flip  <=>  net_gex > 0). If the recompute disagrees with the net sign
+        # (pathological / non-monotonic profile), show nothing rather than mislead.
+        if zero_gamma_spy_val is not None and ((spy_price > zero_gamma_spy_val) != (net_gex > 0)):
+            logger.debug(f"gamma-flip {zero_gamma_spy_val:.2f} inconsistent with net_gex {net_gex:,.0f} (spot {spy_price:.2f}) — suppressed")
+            zero_gamma_spy_val = None
+        zero_gamma_spy = round(zero_gamma_spy_val, 2) if zero_gamma_spy_val is not None else None
+        zero_gamma_spx = float(round(zero_gamma_spy_val * spx_spy_ratio, 0)) if zero_gamma_spy_val is not None else None
+
         result = {
             "net_gex": net_gex,
             "gex_regime": gex_regime,
@@ -648,6 +906,8 @@ def fetch_gex_data(spy_price: float = None, spx_spy_ratio: float = 10.0) -> dict
             "put_wall_spx": put_wall_spx,
             "call_wall_spy": round(call_wall_spy, 1),
             "call_wall_spx": call_wall_spx,
+            "zero_gamma_spy": zero_gamma_spy,
+            "zero_gamma_spx": zero_gamma_spx,
             "top_levels": top_levels_list,
             "total_strikes": len(gex_by_strike),
             "spy_price": round(spy_price, 2),
@@ -678,6 +938,7 @@ def _gex_fallback() -> dict:
         "gamma_wall_spy": 0, "gamma_wall_spx": 0,
         "put_wall_spy": 0, "put_wall_spx": 0,
         "call_wall_spy": 0, "call_wall_spx": 0,
+        "zero_gamma_spy": None, "zero_gamma_spx": None,
         "top_levels": [],
         "total_strikes": 0,
         "spy_price": 0,

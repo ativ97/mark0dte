@@ -92,6 +92,30 @@ VWAP_ELASTICITY_THRESHOLD_PCT = 0.35
 # As of 2026-05: SPX ~5900, SPY ~590 => multiplier ~10.0
 SPX_PROXY_MULTIPLIER = 10.0
 
+# --- TA SESSION FILTER (2026-06-04) ---
+# Restrict ALL technical indicators (RSI / EMA / CHOP / ER / VWAP) to Regular Trading Hours
+# (09:30–16:00 ET). The raw Alpaca 5-min series includes pre/after-market bars, which smear the
+# overnight gap across many small bars and pushed RSI ~20 pts off a standard RTH chart (Robinhood
+# SPX showed 45 while the engine showed 66 on the 6/4 gap day). RTH-only makes the indicators line
+# up with what a regular-hours chart shows. KILL-SWITCH: set False to revert to all-session bars.
+# NOTE: this only fixes the session basis — residual differences vs Robinhood SPX remain because the
+# engine still uses SPY on the IEX feed (vs SPX on the consolidated tape).
+TA_REGULAR_HOURS_ONLY = True
+
+# Compute RSI on the SPX index (^GSPC, via Yahoo) directly instead of the SPY proxy, so the engine's
+# RSI and RSI-50 level match the SPX chart the user actually trades. SPY-proxy RSI carries pre-market
+# bars that smear the overnight gap → read ~20 pts off SPX on gap days (6/4: engine SPY 66 vs SPX 49).
+# Fully DEFENSIVE: any fetch/alignment failure falls back to the SPY-based RSI (never crashes).
+# Caveat: depends on Yahoo ^GSPC intraday freshness; KILL-SWITCH: set False to revert to SPY RSI.
+RSI_SOURCE_SPX = False
+# FINAL (2026-06-04): SPX-direct RSI abandoned — the engine has no real-time SPX feed. Yahoo's ^GSPC
+# intraday HISTORY lags badly, and RSI-14 is a 14-bar smoothed average, so even stitching the fresh
+# ^GSPC quote onto the last bar could NOT rebuild the missing recent bars (gave 53 vs a live 67 on
+# the 6/4 rally). Conclusion: the engine's RSI is a real-time SPY momentum reference; the SPX RSI the
+# user trades is read off their SPX chart. Code (fetch_spx_intraday_bars / _align_rsi_to_index /
+# the stitch) is left in place but OFF — only revive it if a real-time SPX intraday feed is added.
+# NOTE: TA_REGULAR_HOURS_ONLY above is also a no-op (Alpaca limit=500 returns only today's bars).
+
 # --- POSITION RISK BOUNDARIES (SPX Points) ---
 GAMMA_TRAP_THRESHOLD = 10    # Mandatory eject zone
 WARNING_ZONE_THRESHOLD = 25  # Volatility expansion warning
@@ -126,6 +150,13 @@ SIZING_HARD_BLOCK = False         # Ativ choice 2026-05-29: guardrail is INFORMA
 MAX_RISK_WARN = ACCOUNT_SIZE * MAX_RISK_WARN_PCT            # = $3,750 (amber notice)
 MAX_RISK_PER_TRADE = ACCOUNT_SIZE * MAX_RISK_PER_TRADE_PCT  # = $7,500 (reference only)
 MAX_RISK_PER_DAY_PCT = 0.30       # suggested daily stop (cumulative realized loss); guidance only, not enforced
+
+# --- TAIL-DAY PREVIEW (2026-06-03; sizing prominence — the #1 documented leak) ---
+# Rough INFORMATIONAL reference for the "= N good days" framing on the book's max loss.
+# Recent data-driven history (5/20–6/2) averaged ~$1,300/green day; kept round, conservative,
+# and TUNABLE. NOT a fitted parameter — it only scales the "how many good days does one tail
+# day erase" gut-check. Adjust as the account's typical winning day changes.
+AVG_WIN_DAY_REFERENCE = 1300.0
 
 # --- GEX REGIME HYSTERESIS (2026-06-01) ---
 # Deadband around net_gex = 0. The GEX regime only FLIPS sign when |net_gex| crosses this

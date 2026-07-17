@@ -1,6 +1,8 @@
 # 0DTE Algorithmic Decision Support System
 
-**System Architecture & State Rules - Version 5.8**
+**System Architecture & State Rules - Version 5.8.4**
+
+> **v5.8.4 (2026-06-03):** Measurement/visibility build (no core-logic change) — **Tail-Day Preview** (book max-loss $ / % of account / "= N good days"; `compute_tail_day_preview`), **contract-weighted intraday P&L** (was per-share / contract-blind — showed $0.95 vs the real +$1,550 on 6/3), **ΔGEX velocity + distance-to-zero** gauge (`compute_gex_velocity`), and a **proper net-GEX-vs-spot gamma flip** (`_compute_gamma_flip`, replaces the sign-inconsistent cumulative-by-strike calc; enforces spot>flip ⟺ net_gex>0). Plus display single-source fixes: neg-GEX wall "protecting you" → "unreliable"; "all positions safe" / GREEN light gated on open HIGH CLOSE recs; position-neutral `regime_transition` wording. +15 tests → 127. Rationale + over/underfitting discipline: `docs/method_analysis_2026-06-03.md`.
 
 ## 1. Core Philosophy
 
@@ -324,6 +326,27 @@ State is cleared per-position on close and globally on market close via `clear_r
 
 ## 21. System Modification Log
 
+* **[V5.8.3] Under-used signals wired into decisions (2026-06-02):** the previously display-only signals now feed the proposal/exit layer (NOT the core exit-force gate).
+  - **RSI-50** mean-reversion level → a buffer/hazard factor in `analyze_trade_proposal` (favorable when it sits between spot and the short strike; adverse when beyond it).
+  - **FADE regime OFF** (strong trend) → de-rates mean-reversion/credit-spread proposals in `auto_propose_positions`.
+  - **gap_rejection** (which had NO consumer before) → penalizes the side a confirmed rejection is pressing toward.
+  - **premium_trend RISING** → an early exit-tell appended to at-risk/caution leg messages in `evaluate_positions` (informational; does not change action/escalation).
+  - **Deliberately deferred:** rewiring the P0-2 regime/exit gate to `trend_dominant` or the zero-gamma flip — the 6/2 live data showed the flip level (7629) and net-GEX sign (POSITIVE) disagreeing on the regime side, so that swap needs live validation first. 112 tests.
+
+* **[V5.8.2] Wasted-signals build #2–#6 (2026-06-02):** decision-support precision/consistency from the 6/2 live session. No change to the core regime/moat math.
+  - **#2 single-source-of-truth:** a GREEN "hold" card can't coexist with an open HIGH CLOSE rec (reconciled to one verdict; cards carry `close_alerts`).
+  - **#3 direction/size-aware exits:** moat-deficit / near-miss CLOSE recs require genuine danger (warning-zone OR price pressing the strike), not merely "below the ideal buffer" — kills the cry-wolf on a position price is moving away from; the reversal-downgrade is size-capped (an over-warn leg can't be soothed eject→hold).
+  - **#4 hysteresis:** `trend_dominant` sticky (on ≥55 / off <45) so it can't flip on the ER≈0.6 boundary; `regime_transition` widened deadband (weak tiers → "stable, leaning").
+  - **#5 display:** `range_position` on SPX (not SPY); STRONG_ENTRY gated by a return-on-risk floor; RED-but-profitable reframed as "lock the gain"; RSI labeled with its 5-min-SPY/Alpaca basis.
+  - **#6 zero-gamma flip level:** the POSITIVE/NEGATIVE regime boundary from the cumulative signed-GEX zero crossing — surfaced as a Key Level + `gex_data.zero_gamma_spx` (top InsiderFinance gap).
+  - 109 tests (83 `test_engine.py` + 26 `test_positions.py`); synthetic_replay unchanged/green.
+
+* **[V5.8.1] Wasted-signals build — increment #1 (2026-06-02):** from the 6/2 live session (decision-GUIDE reframe; +$1,125 on Robinhood — another positive-GEX day, so P0-2's force path is still unproven). Decision-support display/quality fixes only; no change to the regime/moat/exit math.
+  - **Magnet touch% no longer overclaims.** `compute_magnet_forces` gains `day_high`/`day_low`; a predicted level already inside today's traded range (`already_touched`) or hugging spot (`near_spot`, `< max(8, 0.12σ)`) suppresses `touch_prob` and reframes the headline ("already tagged … not a fresh target") — kills the recurring vacuous "~95% touch" on a level a few points away. New keys `touch_basis` / `already_touched` (native types). Backward-compatible.
+  - **CAUTION moat wording** no longer inverts (showed "−2.2 pts below recommended minimum" when moat ≥ the recommended min).
+  - 98 tests (72 `test_engine.py` incl. `TestMagnetTouchProb` +4, + 26 `test_positions.py`); synthetic_replay unchanged/green.
+  - Next: narrative single-source-of-truth (card↔recs↔exit_strategy), direction/size-aware exit conviction, a hysteresis layer (escalation/transition/trend_dominant), and the zero-gamma flip level.
+
 * **[V5.8] Live checkpoint + 8 post-session fixes (2026-06-01):**
   - First live run of the V5.7 batch (~+$1,500 realized; docs/trading_log_2026-06-01.md). H1/H2/H4 validated live; **P0-2's force-path was NOT exercised** (a chop / mean-reverting day, no trend-through) — the 5/13 fix remains unproven live, needs a genuine trend day.
   - **GEX hysteresis:** `stabilize_gex_regime(net_gex, prev, band=GEX_REGIME_BAND)` — ±20M deadband + stickiness, wired in main.py after `fetch_gex_data`. Stops the regime/moat whipsaw (6/1: net GEX flipped ~6× near zero, swinging the recommended moat 75→104→58→89→77 in minutes).
@@ -339,7 +362,7 @@ State is cleared per-position on close and globally on market close via `clear_r
 * **[V5.7] P0-2 Regime-Conditional EJECT + Sizing Guardrail (2026-05-29):**
   - **P0-2:** `evaluate_positions()` computes `mean_reverting` (positive GEX + no surge) vs `trend_continuation`. (a) Outside a mean-reverting regime, the user-facing action is forced to the escalation level when escalation is URGENT/CRITICAL and the action is a `HOLD_*` (fixes the final-hour action/escalation desync — the 5/13 trap; sets `p0_2_forced`). (b) The C2 reversal-downgrade is now gated to `mean_reverting` only (no longer softens a close in a trend-continuation regime). New position fields: `mean_reverting`, `trend_continuation`.
   - **Validation:** `backend/synthetic_replay.py` drives `evaluate_positions` bar-by-bar with an injected bar-time clock. **GR-0513** (5/13 trend-through) forces a non-downgradable exit ~14 pts before breach; **GR-0529** (5/29 positive-GEX bounce, +$1,255 live) is NOT force-closed; calm-day guard clean.
-  - **P0-3 (partial):** `config.ACCOUNT_SIZE`/`MAX_RISK_PER_TRADE` ($2,000) + `engine.calculate_position_risk()`. Engine still contract-count-blind — wiring is P0-3a.
+  - **P0-3 (partial):** `config.ACCOUNT_SIZE`/`MAX_RISK_PER_TRADE` ($2,000 at this commit) + `engine.calculate_position_risk()`. Engine still contract-count-blind — wiring is P0-3a. *(Superseded later 2026-05-29: the sizing tiers were revised to % of a $15,000 `ACCOUNT_SIZE` — `MAX_RISK_WARN` 25%/$3,750, `MAX_RISK_PER_TRADE` 50%/$7,500 — made INFORMATIONAL via `SIZING_HARD_BLOCK=False`, and `calculate_position_risk` was wired into `evaluate_positions`. See current `config.py` + CLAUDE.md pitfall #21.)*
   - 77 tests (51 `test_engine.py` + 26 `test_positions.py`), all passing.
   - Driven by a full-codebase audit + a live trading session — see docs/IMPLEMENTATION_PLAN.md, docs/VALIDATION_PLAN.md, docs/MONDAY_PREP.md, docs/trading_log_2026-05-29.md.
 

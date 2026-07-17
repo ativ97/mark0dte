@@ -453,6 +453,27 @@ export default function App() {
                   </div>
                 )}
 
+                {/* Tail-Day Preview — sizing prominence: the #1 documented leak (2026-06-03) */}
+                {telemetry.tail_day_preview && telemetry.tail_day_preview.total_max_loss > 0 && (
+                  <div className={`rounded-lg p-3 border ${telemetry.tail_day_preview.over_cap ? 'bg-red-900/30 border-red-500/50 text-red-200' : telemetry.tail_day_preview.over_warn ? 'bg-amber-900/30 border-amber-500/50 text-amber-200' : 'bg-slate-800/40 border-slate-600/50 text-slate-300'}`}>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className={`text-sm font-bold cursor-help ${telemetry.tail_day_preview.over_cap ? 'text-red-400' : telemetry.tail_day_preview.over_warn ? 'text-amber-400' : 'text-slate-200'}`} title="Tail-Day Preview: if every open spread went fully to max loss, this is the total $ damage — as a % of your account, and how many average winning days it would erase. Size so this stays amber-or-better, never red. Informational; it never blocks a trade.">
+                        Tail-Day Preview
+                      </span>
+                      <span className="text-sm font-mono">
+                        Max loss ${Number(telemetry.tail_day_preview.total_max_loss).toLocaleString()} ({telemetry.tail_day_preview.pct_of_account}% of acct)
+                      </span>
+                      <span className={`text-xs font-semibold px-1.5 py-0.5 rounded ${telemetry.tail_day_preview.green_days_equivalent >= 3 ? 'bg-red-500/20 text-red-300' : 'bg-slate-600/40 text-slate-300'}`}>
+                        {'≈'} {telemetry.tail_day_preview.green_days_equivalent} good days
+                      </span>
+                      {telemetry.tail_day_preview.max_lot > 0 && (
+                        <span className="text-xs text-slate-400 ml-auto">max leg {telemetry.tail_day_preview.max_lot} lots</span>
+                      )}
+                    </div>
+                    <p className="text-sm mt-1">{telemetry.tail_day_preview.headline}</p>
+                  </div>
+                )}
+
                 {/* Position Cards */}
                 {insights.position_cards?.length > 0 && (
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -618,6 +639,7 @@ export default function App() {
                             <div className="absolute top-0 bottom-0 left-[60%] w-px bg-slate-600"></div>
                           </div>
                           <div className={`text-[10px] ${rsiText}`}>{rsiLabel}{rsiDelta != null && Math.abs(rsiDelta) >= 2 ? ` (was ${prev.rsi_14.toFixed(0)})` : ''}</div>
+                          {telemetry.rsi_basis && <div className="text-[9px] text-slate-600 mt-0.5" title={telemetry.rsi_basis}>5-min SPY (Alpaca) · differs from Robinhood RSI</div>}
                         </div>
                       );
                     })()}
@@ -1236,6 +1258,17 @@ export default function App() {
                           {(telemetry.gex_data.net_gex / 1e6).toFixed(1)}M
                         </span>
                       </div>
+                      {/* ΔGEX velocity + distance-to-zero gauge (2026-06-03) */}
+                      {telemetry.gex_velocity && telemetry.gex_velocity.samples >= 2 && (
+                        <div className="flex items-center justify-between text-xs mb-2 cursor-help" title={`ΔGEX velocity — how fast net GEX is changing (millions/min) plus a rough ETA to a sign flip. "+" = warming toward POSITIVE/safer (mean-reverting); "−" = deepening NEGATIVE/dangerous (trending). Use the direction, not the exact minute — it's a heads-up gauge, and nothing is confirmed until GEX net actually crosses zero. Now: ${telemetry.gex_velocity.headline}`}>
+                          <span className="text-slate-500">{'Δ'}GEX velocity</span>
+                          <span className={`font-semibold ${telemetry.gex_velocity.toward_flip ? 'text-amber-300' : telemetry.gex_velocity.trend === 'RISING' ? 'text-emerald-400' : telemetry.gex_velocity.trend === 'FALLING' ? 'text-red-400' : 'text-slate-400'}`}>
+                            {telemetry.gex_velocity.velocity_m_per_min > 0 ? '+' : ''}{telemetry.gex_velocity.velocity_m_per_min}M/min
+                            {telemetry.gex_velocity.toward_flip && telemetry.gex_velocity.projected_min_to_flip != null
+                              ? ` ${'→'} flip ~${telemetry.gex_velocity.projected_min_to_flip}m` : ''}
+                          </span>
+                        </div>
+                      )}
                       {telemetry.gex_data.top_levels && telemetry.gex_data.top_levels.length > 0 && (
                         <div className="border-t border-slate-700/50 pt-2">
                           <div className="text-[10px] text-slate-500 mb-2" title="Strikes with the largest gamma exposure. Higher gamma = more dealer hedging activity = stronger magnet/wall. These are where massive order volume sits.">Top GEX Levels — Order Volume by Strike</div>
@@ -2251,7 +2284,7 @@ export default function App() {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
               <div className="bg-red-900/20 p-3 rounded border border-red-700/50">
                 <span className="font-bold text-red-400">DETERIORATING</span>
-                <p className="text-slate-400 mt-1">Regime is degrading fast. Chop increasing, trend fading. Widen moats and avoid new entries.</p>
+                <p className="text-slate-400 mt-1">Chop building, trend weakening → whipsaw risk up, widen moats. Note: more chop actually FAVORS premium-sellers (theta works), but raises false-breakout risk.</p>
               </div>
               <div className="bg-amber-900/20 p-3 rounded border border-amber-700/50">
                 <span className="font-bold text-amber-400">SOFTENING</span>
@@ -2259,14 +2292,50 @@ export default function App() {
               </div>
               <div className="bg-emerald-900/20 p-3 rounded border border-emerald-700/50">
                 <span className="font-bold text-emerald-400">IMPROVING</span>
-                <p className="text-slate-400 mt-1">Regime is getting stronger. Trend forming, chop decreasing. Tighter moats may be viable.</p>
+                <p className="text-slate-400 mt-1">Trend strengthening, chop fading → cleaner direction. Good for trend-followers, but FADES / premium-sells get riskier (the move can run). Widen or skip counter-trend.</p>
               </div>
               <div className="bg-blue-900/20 p-3 rounded border border-blue-700/50">
                 <span className="font-bold text-blue-400">FIRMING</span>
                 <p className="text-slate-400 mt-1">Chop is beginning to resolve. A directional move may be forming.</p>
               </div>
             </div>
-            <p className="text-sm text-slate-500 mt-3">The confidence percentage tells you how strong the signal is. Below 50% = noise. Above 70% = pay attention.</p>
+            <p className="text-sm text-slate-500 mt-3">The confidence percentage tells you how strong the signal is (below 50% = noise; above 70% = pay attention). These labels describe the regime's DIRECTION / clarity — not whether it's good for <span className="italic">your</span> position: a strengthening trend helps trend-followers but is riskier for premium-sellers / fades.</p>
+          </div>
+
+          {/* --- GEX READOUTS: NET / FLIP / ΔGEX VELOCITY --- */}
+          <div className="bg-slate-800 border border-slate-700 rounded-lg p-8 shadow-xl">
+            <h3 className="text-lg font-semibold text-slate-200 mb-2">Reading GEX: Net, Flip &amp; ΔGEX Velocity</h3>
+            <p className="text-sm text-slate-400 mb-4">Think of dealer gamma (GEX) as the market's <span className="text-slate-200 font-semibold">weather</span>. These three readouts tell you the temperature now, where the freezing line is, and which way it's heading.</p>
+            <div className="space-y-3 text-sm">
+              <div className="bg-slate-900/50 p-3 rounded border border-slate-700">
+                <span className="font-bold text-slate-100">Net GEX — the temperature now</span>
+                <p className="text-slate-400 mt-1"><span className="text-red-400 font-semibold">NEGATIVE</span> = dealers amplify moves → trending / volatile, no guardrails (dangerous for short spreads). <span className="text-emerald-400 font-semibold">POSITIVE</span> = dealers dampen moves → mean-reverting, ranges hold (safer). Shown as e.g. "−39M".</p>
+              </div>
+              <div className="bg-slate-900/50 p-3 rounded border border-slate-700">
+                <span className="font-bold text-blue-400">Zero-Gamma Flip — the freezing line</span>
+                <p className="text-slate-400 mt-1">The SPX price where GEX switches sign. SPX <span className="font-semibold">below</span> the flip = negative / dangerous zone; <span className="font-semibold">above</span> it = positive / safer zone. Example: spot 7542, flip 7557 → price is 15 pts below the line — still dangerous, but near the edge. (Shown in Key Levels; re-prices every poll.)</p>
+              </div>
+              <div className="bg-slate-900/50 p-3 rounded border border-slate-700">
+                <span className="font-bold text-amber-400">ΔGEX Velocity — which way the weather's heading</span>
+                <p className="text-slate-400 mt-1">Reads like "<span className="font-mono">+6.2M/min → flip ~6 min</span>". The <span className="font-semibold">+/−</span> = GEX rising (warming toward safe) or falling (cooling toward danger), in millions per minute. The <span className="font-semibold">~6 min</span> = rough ETA to crossing the flip line at that speed. Use the <span className="italic">direction</span>, not the exact minute — it's a heads-up gauge, it's noisy, and nothing is confirmed until GEX net actually crosses zero.</p>
+              </div>
+            </div>
+          </div>
+
+          {/* --- TAIL-DAY PREVIEW (SIZING) --- */}
+          <div className="bg-slate-800 border border-slate-700 rounded-lg p-8 shadow-xl">
+            <h3 className="text-lg font-semibold text-slate-200 mb-2">Tail-Day Preview (Your Worst Case)</h3>
+            <p className="text-sm text-slate-400 mb-4">The single most important sizing check. It answers: <span className="text-slate-200 font-semibold">if every open spread went fully against you, how bad is the damage?</span></p>
+            <div className="space-y-3 text-sm">
+              <div className="bg-slate-900/50 p-3 rounded border border-slate-700">
+                <span className="font-bold text-slate-100">What it shows</span>
+                <p className="text-slate-400 mt-1">Your book's total max loss in <span className="font-semibold">dollars</span>, as a <span className="font-semibold">% of account</span>, and "<span className="font-semibold">≈ N good days</span>" — how many average winning days one bad day would erase. Colored green / amber / red by how big the risk is.</p>
+              </div>
+              <div className="bg-slate-900/50 p-3 rounded border border-slate-700">
+                <span className="font-bold text-emerald-400">How to use it</span>
+                <p className="text-slate-400 mt-1">Size so the banner stays <span className="text-amber-400 font-semibold">amber-or-better</span>, never red. A real edge with a fat tail still blows up if it's sized too big — this keeps any single bad day survivable. It's informational and never blocks a trade.</p>
+              </div>
+            </div>
           </div>
 
           {/* --- INDICATORS --- */}

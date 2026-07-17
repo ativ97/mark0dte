@@ -3,6 +3,22 @@
   <component name="ChangeListManager">
     <list default="true" id="e3f1540d-1107-4fd3-8769-3b4c932b36f7" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.windsurfrules" beforeDir="false" afterPath="$PROJECT_DIR$/.windsurfrules" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/CLAUDE.md" beforeDir="false" afterPath="$PROJECT_DIR$/CLAUDE.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/config.py" beforeDir="false" afterPath="$PROJECT_DIR$/backend/config.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/data_fetcher.py" beforeDir="false" afterPath="$PROJECT_DIR$/backend/data_fetcher.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/database.py" beforeDir="false" afterPath="$PROJECT_DIR$/backend/database.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/engine.py" beforeDir="false" afterPath="$PROJECT_DIR$/backend/engine.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/main.py" beforeDir="false" afterPath="$PROJECT_DIR$/backend/main.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/quant_engine.db" beforeDir="false" afterPath="$PROJECT_DIR$/backend/quant_engine.db" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/signal_log.jsonl" beforeDir="false" afterPath="$PROJECT_DIR$/backend/signal_log.jsonl" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/backend/test_engine.py" beforeDir="false" afterPath="$PROJECT_DIR$/backend/test_engine.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/Algorithm_States.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/Algorithm_States.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/User_Manual.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/User_Manual.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/docs/implementation_progress.md" beforeDir="false" afterPath="$PROJECT_DIR$/docs/implementation_progress.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/frontend/src/app.jsx" beforeDir="false" afterPath="$PROJECT_DIR$/frontend/src/app.jsx" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/readme.md" beforeDir="false" afterPath="$PROJECT_DIR$/readme.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/tradehistory/56b90f3d-d0bf-5ab9-a874-a712814db655.csv" beforeDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -40,20 +56,27 @@
   &quot;keyToString&quot;: {
     &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
     &quot;Python tests.Python tests for backend.test_engine.TestQuantEngine.executor&quot;: &quot;Run&quot;,
+    &quot;Python tests.Python tests for backend.test_positions.TestEvaluatePositions.executor&quot;: &quot;Run&quot;,
     &quot;Python tests.Python tests in test_engine.py.executor&quot;: &quot;Run&quot;,
+    &quot;Python tests.Python tests in test_positions.py.executor&quot;: &quot;Run&quot;,
     &quot;Python.main.executor&quot;: &quot;Run&quot;,
+    &quot;Python.synthetic_replay.executor&quot;: &quot;Run&quot;,
     &quot;Python.test_simulator.executor&quot;: &quot;Run&quot;,
     &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
     &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
     &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
     &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,
     &quot;codeWithMe.voiceChat.enabledByDefault&quot;: &quot;false&quot;,
-    &quot;git-widget-placeholder&quot;: &quot;main&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;feature/claude-enhancements&quot;,
+    &quot;last_opened_file_path&quot;: &quot;/Users/ativ.aggarwal/PycharmProjects/mark/tradehistory&quot;,
     &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
     &quot;settings.editor.selected.configurable&quot;: &quot;preferences.pluginManager&quot;
   }
 }</component>
   <component name="RecentsManager">
+    <key name="CopyFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$/tradehistory" />
+    </key>
     <key name="MoveFile.RECENT_KEYS">
       <recent name="$PROJECT_DIR$/backend" />
     </key>
@@ -68,9 +91,8 @@
         <env name="PYTHONUNBUFFERED" value="1" />
       </envs>
       <option name="SDK_HOME" value="" />
-      <option name="SDK_NAME" value="mark" />
       <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$/backend" />
-      <option name="IS_MODULE_SDK" value="false" />
+      <option name="IS_MODULE_SDK" value="true" />
       <option name="ADD_CONTENT_ROOTS" value="true" />
       <option name="ADD_SOURCE_ROOTS" value="true" />
       <option name="DEBUG_JUST_MY_CODE" value="false" />
@@ -84,7 +106,7 @@
       <option name="INPUT_FILE" value="" />
       <method v="2" />
     </configuration>
-    <configuration name="test_simulator" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
+    <configuration name="synthetic_replay" type="PythonConfigurationType" factoryName="Python" temporary="true" nameIsGenerated="true">
       <module name="mark" />
       <option name="ENV_FILES" value="" />
       <option name="INTERPRETER_OPTIONS" value="" />
@@ -99,7 +121,7 @@
       <option name="ADD_SOURCE_ROOTS" value="true" />
       <option name="DEBUG_JUST_MY_CODE" value="false" />
       <option name="RUN_TOOL" value="" />
-      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/backend/test_simulator.py" />
+      <option name="SCRIPT_NAME" value="$PROJECT_DIR$/backend/synthetic_replay.py" />
       <option name="PARAMETERS" value="" />
       <option name="SHOW_COMMAND_LINE" value="false" />
       <option name="EMULATE_TERMINAL" value="false" />
@@ -108,7 +130,7 @@
       <option name="INPUT_FILE" value="" />
       <method v="2" />
     </configuration>
-    <configuration name="Python tests for backend.test_engine.TestQuantEngine" type="tests" factoryName="Autodetect" temporary="true" nameIsGenerated="true">
+    <configuration name="Python tests for backend.test_positions.TestEvaluatePositions" type="tests" factoryName="Autodetect" temporary="true" nameIsGenerated="true">
       <module name="mark" />
       <option name="ENV_FILES" value="" />
       <option name="INTERPRETER_OPTIONS" value="" />
@@ -121,7 +143,7 @@
       <option name="DEBUG_JUST_MY_CODE" value="false" />
       <option name="RUN_TOOL" value="" />
       <option name="_new_additionalArguments" value="&quot;&quot;" />
-      <option name="_new_target" value="&quot;backend.test_engine.TestQuantEngine&quot;" />
+      <option name="_new_target" value="&quot;backend.test_positions.TestEvaluatePositions&quot;" />
       <option name="_new_targetType" value="&quot;PYTHON&quot;" />
       <method v="2" />
     </configuration>
@@ -142,18 +164,37 @@
       <option name="_new_targetType" value="&quot;PATH&quot;" />
       <method v="2" />
     </configuration>
+    <configuration name="Python tests in test_positions.py" type="tests" factoryName="Autodetect" temporary="true" nameIsGenerated="true">
+      <module name="mark" />
+      <option name="ENV_FILES" value="" />
+      <option name="INTERPRETER_OPTIONS" value="" />
+      <option name="PARENT_ENVS" value="true" />
+      <option name="SDK_HOME" value="" />
+      <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$" />
+      <option name="IS_MODULE_SDK" value="true" />
+      <option name="ADD_CONTENT_ROOTS" value="true" />
+      <option name="ADD_SOURCE_ROOTS" value="true" />
+      <option name="DEBUG_JUST_MY_CODE" value="false" />
+      <option name="RUN_TOOL" value="" />
+      <option name="_new_additionalArguments" value="&quot;&quot;" />
+      <option name="_new_target" value="&quot;$PROJECT_DIR$/backend/test_positions.py&quot;" />
+      <option name="_new_targetType" value="&quot;PATH&quot;" />
+      <method v="2" />
+    </configuration>
     <list>
-      <item itemvalue="Python.test_simulator" />
+      <item itemvalue="Python.synthetic_replay" />
       <item itemvalue="Python.main" />
-      <item itemvalue="Python tests.Python tests for backend.test_engine.TestQuantEngine" />
+      <item itemvalue="Python tests.Python tests for backend.test_positions.TestEvaluatePositions" />
+      <item itemvalue="Python tests.Python tests in test_positions.py" />
       <item itemvalue="Python tests.Python tests in test_engine.py" />
     </list>
     <recent_temporary>
       <list>
         <item itemvalue="Python.main" />
-        <item itemvalue="Python.test_simulator" />
+        <item itemvalue="Python.synthetic_replay" />
         <item itemvalue="Python tests.Python tests in test_engine.py" />
-        <item itemvalue="Python tests.Python tests for backend.test_engine.TestQuantEngine" />
+        <item itemvalue="Python tests.Python tests in test_positions.py" />
+        <item itemvalue="Python tests.Python tests for backend.test_positions.TestEvaluatePositions" />
       </list>
     </recent_temporary>
   </component>
@@ -193,7 +234,7 @@
       <breakpoints>
         <line-breakpoint enabled="true" suspend="THREAD" type="python-line">
           <url>file://$PROJECT_DIR$/backend/main.py</url>
-          <line>49</line>
+          <line>109</line>
           <option name="timeStamp" value="1" />
         </line-breakpoint>
       </breakpoints>

@@ -962,6 +962,481 @@ class TestPositionSizing(unittest.TestCase):
         self.assertFalse(r["over_limit"])
 
 
+class TestMagnetTouchProb(unittest.TestCase):
+    """2026-06-02 live session: the magnet touch% must not overclaim on a level price has
+    already tagged today, or one hugging spot (prob saturates ~100%). Increment #1 of the
+    wasted-signals build (kills the recurring vacuous '~95% touch' read)."""
+
+    GEX = {"gex_regime": "POSITIVE", "net_gex": 35_000_000.0, "gamma_wall_spx": 7636}
+    EM = {"conditional_1sigma": 65.6}
+
+    def test_already_touched_level_suppresses_touch_prob(self):
+        from engine import compute_magnet_forces
+        m = compute_magnet_forces(
+            7592.9, self.GEX, 59.7,
+            {"er_value": 0.09, "regime_state": "STATE B", "directional_bias": "LEAN BULLISH"},
+            self.EM, rsi_50_spx=7588, hours_remaining=6.45, day_high=7595.4, day_low=7583.7)
+        self.assertTrue(m["already_touched"])
+        self.assertIsNone(m["touch_prob"])
+        self.assertEqual(m["touch_basis"], "already_touched")
+        self.assertIn("already tagged", m["headline"].lower())
+
+    def test_far_untouched_level_keeps_touch_prob(self):
+        from engine import compute_magnet_forces
+        m = compute_magnet_forces(
+            7593.0, self.GEX, 66,
+            {"er_value": 0.33, "regime_state": "STATE A", "directional_bias": "BULLISH"},
+            self.EM, rsi_50_spx=7590, hours_remaining=5.9, day_high=7596.0, day_low=7583.0)
+        self.assertEqual(m["predicted_magnet"], "GEX Wall")
+        self.assertIsNotNone(m["touch_prob"])
+        self.assertEqual(m["touch_basis"], "distribution")
+
+    def test_backward_compatible_without_day_range(self):
+        from engine import compute_magnet_forces
+        m = compute_magnet_forces(
+            7593.0, self.GEX, 66,
+            {"er_value": 0.33, "regime_state": "STATE A", "directional_bias": "BULLISH"},
+            self.EM, rsi_50_spx=7590, hours_remaining=5.9)
+        self.assertFalse(m["already_touched"])
+        self.assertEqual(m["touch_basis"], "distribution")
+
+    def test_touch_fields_are_native_types(self):
+        from engine import compute_magnet_forces
+        m = compute_magnet_forces(
+            7592.9, self.GEX, 59.7,
+            {"er_value": 0.09, "regime_state": "STATE B", "directional_bias": "LEAN BULLISH"},
+            self.EM, rsi_50_spx=7588, hours_remaining=6.45, day_high=7595.4, day_low=7583.7)
+        self.assertIsInstance(m["already_touched"], bool)  # native, not numpy.bool_ (pitfall #25)
+
+
+class TestCardRecReconciliation(unittest.TestCase):
+    """#2 (2026-06-02): a position with an open HIGH CLOSE rec must NOT render a GREEN 'hold' card
+    (the live 6/2 contradiction — GREEN card vs HIGH CLOSE rec on the same position)."""
+
+    REGIME = {"time_pressure": {"hours_remaining": 4.0}, "er_value": 0.2,
+              "regime_state": "STATE B: MODERATE CHOP", "directional_bias": "NEUTRAL",
+              "momentum": {"momentum_label": "RANGEBOUND"}, "rsi_14": 55.0,
+              "regime_score": 2, "continuous_score": 2.1, "chop_value": 40.0, "vwap_dev": 0.05}
+
+    def _pos(self):
+        return {"id": 1, "type": "Put Spread", "strike": 7570, "moat": 46.0, "moat_pct": 57.0,
+                "credit": 0.65, "estimated_buyback": 0.10, "reversal_score": 30,
+                "exit_strategy": {"action": "HOLD", "escalation_level": "SAFE", "trigger_spx": 7595},
+                "pricing_source": "SPXW"}
+
+    def test_green_card_with_open_high_close_rec_becomes_yellow(self):
+        from engine import generate_market_insights
+        recs = [{"priority": "HIGH", "category": "CLOSE", "target_id": 1, "message": "stale day-low rec"}]
+        out = generate_market_insights(self.REGIME, [self._pos()], {},
+                                       expected_move_data={"conditional_1sigma": 50}, gex_data=None,
+                                       spx_price=7616, day_high_spx=7620, day_low_spx=7583,
+                                       recommendations=recs)
+        card = out["position_cards"][0]
+        self.assertNotEqual(card["light"], "GREEN")        # no GREEN-hold-while-CLOSE
+        self.assertEqual(card["close_alerts"], 1)
+        self.assertIsNotNone(card["close_alert_msg"])
+
+    def test_green_card_with_no_close_rec_stays_green(self):
+        from engine import generate_market_insights
+        out = generate_market_insights(self.REGIME, [self._pos()], {},
+                                       expected_move_data={"conditional_1sigma": 50}, gex_data=None,
+                                       spx_price=7616, day_high_spx=7620, day_low_spx=7583,
+                                       recommendations=[])
+        card = out["position_cards"][0]
+        self.assertEqual(card["light"], "GREEN")           # ~85% profit, big moat → safe
+        self.assertEqual(card["close_alerts"], 0)
+
+
+class TestExitConvictionDirectionAware(unittest.TestCase):
+    """#3 (2026-06-02): a position below half the recommended moat should NOT get a HIGH CLOSE
+    when price is trending AWAY from the strike (at_risk_side False) — the live 6/2 cry-wolf."""
+
+    def _regime(self, bias="BULLISH"):
+        return {"regime_score": 1, "effective_moat_min": 62, "directional_bias": bias,
+                "momentum": {"momentum_label": "MILD DRIFT UP", "change_2h_spx_pts": 10},
+                "time_pressure": {"hours_remaining": 4.0, "time_pressure_level": "LOW"},
+                "er_value": 0.3, "regime_state": "STATE A: TRENDING"}
+
+    def _put(self, at_risk):
+        return {"id": 1, "type": "Put Spread", "strike": 7570, "moat": 30.0, "moat_pct": 37.0,
+                "credit": 0.65, "estimated_pl": 0.2, "estimated_buyback": 0.45, "reversal_score": 20,
+                "at_risk_side": at_risk, "contracts": 5,
+                "exit_strategy": {"action": "HOLD_WITH_TRIGGER", "escalation_level": "SAFE"}}
+
+    def _high_close(self, recs, pid=1):
+        return [r for r in recs if r.get("target_id") == pid
+                and r.get("priority") == "HIGH" and r.get("category") == "CLOSE"]
+
+    def test_no_high_close_when_price_trending_away(self):
+        from engine import generate_recommendations, clear_rec_state
+        clear_rec_state()
+        # price 7616 well above the 7570 put strike, day low 7600 (no near-miss), at_risk False
+        recs = generate_recommendations([self._put(at_risk=False)], 7616.0, self._regime(),
+                                        day_high_spx=7620.0, day_low_spx=7600.0, range_position=80.0)
+        self.assertEqual(self._high_close(recs), [])
+
+    def test_high_close_when_price_pressing_strike(self):
+        from engine import generate_recommendations, clear_rec_state
+        clear_rec_state()
+        # price near the strike, day low 7583 (within 15 of strike), at_risk True
+        recs = generate_recommendations([self._put(at_risk=True)], 7585.0, self._regime("BEARISH"),
+                                        day_high_spx=7620.0, day_low_spx=7583.0, range_position=15.0)
+        self.assertGreaterEqual(len(self._high_close(recs)), 1)
+
+
+class TestTrendDominantHysteresis(unittest.TestCase):
+    """#4 (2026-06-02): trend_dominant must not whipsaw on the ER~0.6 boundary — once ON it sticks
+    (>=45 floor) until the trend truly fades; from OFF it needs the full >=55 turn-on."""
+
+    GEX = {"gex_regime": "POSITIVE", "net_gex": 35_000_000.0, "gamma_wall_spx": 7700}
+    EM = {"conditional_1sigma": 50}
+
+    def _call(self, er, prev):
+        from engine import compute_magnet_forces
+        return compute_magnet_forces(
+            7600.0, self.GEX, 50.0,
+            {"er_value": er, "regime_state": "STATE A: TRENDING", "directional_bias": "BULLISH"},
+            self.EM, rsi_50_spx=None, hours_remaining=6.5, prev_trend_dominant=prev)
+
+    def test_from_off_stays_off_in_deadband(self):
+        # er 0.3 → trend_strength ~52 (below the 55 turn-ON) → stays False when prev False
+        self.assertFalse(self._call(0.3, prev=False)["trend_dominant"])
+
+    def test_sticky_on_in_deadband(self):
+        # same ~52, but already ON → stays ON (>=45 floor): no whipsaw off
+        self.assertTrue(self._call(0.3, prev=True)["trend_dominant"])
+
+    def test_clears_when_trend_fades(self):
+        # er 0.2 → trend_strength ~43 (below the 45 OFF floor) → drops even if prev True
+        self.assertFalse(self._call(0.2, prev=True)["trend_dominant"])
+
+
+class TestProposalRRFloor(unittest.TestCase):
+    """#5 (2026-06-02): a thin-credit spread can't be STRONG_ENTRY regardless of moat (6/2 $0.18)."""
+
+    REGIME = {"time_pressure": {"hours_remaining": 5.0}, "directional_bias": "BULLISH",
+              "regime_score": 1, "er_value": 0.2, "regime_state": "STATE A: TRENDING"}
+
+    def test_thin_credit_never_strong(self):
+        from engine import analyze_trade_proposal
+        # huge moat, with-trend, positive GEX — would score STRONG — but $0.18 credit (~3.7% RR)
+        r = analyze_trade_proposal("Put Spread", 7500, 0.18, 7616.0, self.REGIME, 40,
+                                   7620.0, 7600.0, 80.0, [],
+                                   gex_data={"gex_regime": "POSITIVE", "net_gex": 35e6,
+                                             "put_wall_spx": 7400, "gamma_wall_spx": 7650})
+        self.assertNotEqual(r["verdict"], "STRONG_ENTRY")
+
+    def test_healthy_credit_can_be_strong(self):
+        from engine import analyze_trade_proposal
+        # same strong setup but a real $0.80 credit (~19% RR) is allowed to be STRONG
+        r = analyze_trade_proposal("Put Spread", 7500, 0.80, 7616.0, self.REGIME, 40,
+                                   7620.0, 7600.0, 80.0, [],
+                                   gex_data={"gex_regime": "POSITIVE", "net_gex": 35e6,
+                                             "put_wall_spx": 7400, "gamma_wall_spx": 7650})
+        self.assertIn(r["verdict"], ("STRONG_ENTRY", "ACCEPTABLE"))  # not blocked by the RR floor
+
+
+class TestZeroGammaFlip(unittest.TestCase):
+    """#6 (2026-06-02): zero-gamma flip level interpolates where cumulative signed GEX crosses 0."""
+
+    def test_flip_between_put_and_call_heavy(self):
+        from data_fetcher import _compute_zero_gamma
+        # puts (negative) below 600, calls (positive) above → cumulative crosses ~600
+        flip = _compute_zero_gamma([(595, -100), (598, -60), (601, 60), (604, 120)], spot=600)
+        self.assertIsNotNone(flip)
+        self.assertTrue(595 <= flip <= 604)
+        self.assertIsInstance(flip, float)
+
+    def test_one_sided_returns_none(self):
+        from data_fetcher import _compute_zero_gamma
+        self.assertIsNone(_compute_zero_gamma([(595, 10.0), (600, 20.0)], spot=600))
+
+
+class TestReportingBugFixes20260603(unittest.TestCase):
+    """2026-06-03 fixes: proper net-GEX-vs-spot gamma flip (invariant spot>flip<=>net_gex>0);
+    neg-GEX 'wall protecting you' false-comfort; 'all positions safe' gated on HIGH CLOSE recs;
+    position-neutral regime-transition wording."""
+
+    T = 2.0 / (252 * 6.5)  # ~2h to expiry, in years
+
+    # --- proper gamma flip (vs-spot recompute) ---
+    def test_gamma_flip_call_heavy_below_spot(self):
+        from data_fetcher import _compute_gamma_flip
+        # heavy call OI just above spot → net GEX > 0 at spot → flip must sit BELOW spot
+        chain = [(590, 0.2, 500, -1.0), (595, 0.2, 800, -1.0),
+                 (605, 0.2, 3000, 1.0), (610, 0.2, 3000, 1.0)]
+        flip = _compute_gamma_flip(chain, self.T, 600.0)
+        self.assertIsNotNone(flip)
+        self.assertLess(flip, 600.0)   # spot > flip <=> net_gex > 0
+
+    def test_gamma_flip_put_heavy_above_spot(self):
+        from data_fetcher import _compute_gamma_flip
+        # heavy put OI just below spot → net GEX < 0 at spot → flip must sit ABOVE spot
+        chain = [(590, 0.2, 3000, -1.0), (595, 0.2, 3000, -1.0),
+                 (605, 0.2, 800, 1.0), (610, 0.2, 500, 1.0)]
+        flip = _compute_gamma_flip(chain, self.T, 600.0)
+        self.assertIsNotNone(flip)
+        self.assertGreater(flip, 600.0)
+
+    def test_gamma_flip_one_sided_none(self):
+        from data_fetcher import _compute_gamma_flip
+        # all calls → net GEX never crosses zero in the band → no flip
+        chain = [(605, 0.2, 1000, 1.0), (610, 0.2, 1000, 1.0), (615, 0.2, 1000, 1.0)]
+        self.assertIsNone(_compute_gamma_flip(chain, self.T, 600.0))
+
+    # --- neg-GEX wall must not claim "protecting you" ---
+    REGIME = {"time_pressure": {"hours_remaining": 4.0}, "er_value": 0.2,
+              "regime_state": "STATE B: MODERATE CHOP", "directional_bias": "NEUTRAL",
+              "momentum": {"momentum_label": "RANGEBOUND"}, "rsi_14": 50.0,
+              "regime_score": 2, "continuous_score": 2.1, "chop_value": 40.0, "vwap_dev": 0.05}
+
+    def _put_pos(self):
+        return {"id": 1, "type": "Put Spread", "strike": 7565, "moat": 30.0, "moat_pct": 37.0,
+                "credit": 0.65, "estimated_buyback": 0.45, "reversal_score": 20,
+                "exit_strategy": {"action": "HOLD", "escalation_level": "SAFE"}, "pricing_source": "SPXW"}
+
+    def _wall_gex(self, regime):
+        return {"gex_regime": regime, "net_gex": (-50e6 if regime == "NEGATIVE" else 50e6),
+                "gamma_wall_spx": 7626, "put_wall_spx": 7570, "call_wall_spx": 7616, "top_levels": []}
+
+    def test_neg_gex_wall_not_protecting(self):
+        from engine import generate_market_insights
+        out = generate_market_insights(self.REGIME, [self._put_pos()], {},
+                                       expected_move_data={"conditional_1sigma": 50},
+                                       gex_data=self._wall_gex("NEGATIVE"),
+                                       spx_price=7600, day_high_spx=7620, day_low_spx=7560, recommendations=[])
+        gp = out["position_cards"][0]["gex_proximity"]
+        self.assertNotIn("protecting you", gp)
+        self.assertIn("unreliable", gp)
+
+    def test_pos_gex_wall_protecting(self):
+        from engine import generate_market_insights
+        out = generate_market_insights(self.REGIME, [self._put_pos()], {},
+                                       expected_move_data={"conditional_1sigma": 50},
+                                       gex_data=self._wall_gex("POSITIVE"),
+                                       spx_price=7600, day_high_spx=7620, day_low_spx=7560, recommendations=[])
+        gp = out["position_cards"][0]["gex_proximity"]
+        self.assertIn("protecting you", gp)
+
+    # --- 'all positions safe' must be gated on open HIGH CLOSE recs ---
+    QUIET = {"time_pressure": {"hours_remaining": 3.0}, "er_value": 0.05,
+             "regime_state": "STATE C: HIGH ENTROPY / WHIPSAW", "directional_bias": "NEUTRAL",
+             "momentum": {"momentum_label": "RANGEBOUND"}, "rsi_14": 50.0,
+             "regime_score": 3, "continuous_score": 3.0, "chop_value": 50.0, "vwap_dev": 0.05}
+
+    def test_all_safe_suppressed_when_high_close_open(self):
+        from engine import generate_market_insights
+        safe_pos = {"id": 1, "type": "Put Spread", "strike": 7400, "moat": 46.0, "moat_pct": 57.0,
+                    "credit": 0.65, "estimated_buyback": 0.30, "reversal_score": 20,
+                    "exit_strategy": {"action": "HOLD", "escalation_level": "SAFE"}, "pricing_source": "SPXW"}
+        recs = [{"priority": "HIGH", "category": "CLOSE", "target_id": 1, "message": "flagged"}]
+        out = generate_market_insights(self.QUIET, [safe_pos], {},
+                                       expected_move_data={"conditional_1sigma": 50}, gex_data=None,
+                                       spx_price=7600, day_high_spx=7620, day_low_spx=7560, recommendations=recs)
+        self.assertNotIn("All positions are safe", out["market_story"])
+        self.assertNotEqual(out["market_light"], "GREEN")
+
+    # --- regime-transition wording is position-neutral (no 'improving'/'degrading') ---
+    def test_regime_transition_wording_neutral(self):
+        from engine import _compute_regime_transition
+        rows = [{"CHOP": 61.8, "ER": 0.05, "RSI_14": 50.0, "Close": 600.0,
+                 "EMA_9": 600.0, "EMA_21": 600.0} for _ in range(7)]
+        df = pd.DataFrame(rows)
+        # current continuous_score far below the 30-min-ago value → score_delta < -0.5 → IMPROVING branch
+        out = _compute_regime_transition(df, "CHOP", "ER", current_continuous_score=1.0)
+        self.assertEqual(out["direction"], "IMPROVING")
+        self.assertIn("Trend strengthening", out["label"])
+        self.assertNotIn("improving", out["label"].lower())
+
+
+class TestTailDayPreview(unittest.TestCase):
+    """2026-06-03 sizing prominence: book-level max-loss preview ($ / % of account / green-days)."""
+
+    def _leg(self, contracts, credit=0.5, pid=1, pr=None):
+        d = {"id": pid, "type": "Put Spread", "strike": 7540.0, "credit": credit, "contracts": contracts}
+        if pr is not None:
+            d["position_risk"] = pr
+        return d
+
+    def test_empty_book(self):
+        from engine import compute_tail_day_preview
+        out = compute_tail_day_preview([])
+        self.assertEqual(out["total_max_loss"], 0.0)
+        self.assertEqual(out["max_lot"], 0)
+        self.assertFalse(out["over_cap"])
+        self.assertIn("No open positions", out["headline"])
+
+    def test_oversized_book_math_and_flags(self):
+        from engine import compute_tail_day_preview
+        legs = [self._leg(10, pid=1), self._leg(10, pid=2), self._leg(10, pid=3)]
+        out = compute_tail_day_preview(legs, account_size=15000.0, avg_win_day_ref=1300.0)
+        # each leg: (5 - 0.5) * 10 * 100 = 4500; 3 legs = 13,500 = 90% of a $15k account
+        self.assertEqual(out["total_max_loss"], 13500.0)
+        self.assertEqual(out["pct_of_account"], 90.0)
+        self.assertAlmostEqual(out["green_days_equivalent"], 10.4, places=1)
+        self.assertTrue(out["over_warn"])
+        self.assertTrue(out["over_cap"])
+        self.assertEqual(out["max_lot"], 10)
+        self.assertEqual(out["worst_leg"]["max_loss"], 4500.0)
+
+    def test_prefers_position_risk_max_loss(self):
+        from engine import compute_tail_day_preview
+        out = compute_tail_day_preview([self._leg(5, pr={"max_loss": 999.0})], account_size=15000.0)
+        self.assertEqual(out["total_max_loss"], 999.0)
+
+    def test_native_types(self):
+        from engine import compute_tail_day_preview
+        out = compute_tail_day_preview([self._leg(30)])
+        for k in ("total_max_loss", "pct_of_account", "green_days_equivalent"):
+            self.assertIsInstance(out[k], float)
+        self.assertIsInstance(out["max_lot"], int)
+        self.assertIsInstance(out["over_cap"], bool)
+
+
+class TestGexVelocity(unittest.TestCase):
+    """2026-06-03: ΔGEX velocity + distance-to-zero gauge (the practical GEX-flip read)."""
+
+    def _hist(self, vals, step=60.0, base=1_000_000.0):
+        return [(base + i * step, v) for i, v in enumerate(vals)]
+
+    def test_toward_positive_flip(self):
+        from engine import compute_gex_velocity
+        out = compute_gex_velocity(self._hist([-20e6, -15e6, -10e6, -5e6]), net_gex=-5e6)
+        self.assertEqual(out["trend"], "RISING")
+        self.assertTrue(out["toward_flip"])          # negative + rising → heading to a positive flip
+        self.assertAlmostEqual(out["projected_min_to_flip"], 1.0, places=1)  # 5M left / 5M-per-min
+
+    def test_deepening_negative_not_toward_flip(self):
+        from engine import compute_gex_velocity
+        out = compute_gex_velocity(self._hist([-20e6, -35e6, -50e6, -65e6]), net_gex=-65e6)
+        self.assertEqual(out["trend"], "FALLING")
+        self.assertFalse(out["toward_flip"])          # negative + falling = deepening, no flip
+        self.assertIsNone(out["projected_min_to_flip"])
+        self.assertIn("deepening", out["headline"])
+
+    def test_warming_up_single_sample(self):
+        from engine import compute_gex_velocity
+        out = compute_gex_velocity([(1_000_000.0, -30e6)], net_gex=-30e6)
+        self.assertEqual(out["samples"], 1)
+        self.assertIn("warming up", out["headline"])
+
+    def test_spot_to_flip_and_native_types(self):
+        from engine import compute_gex_velocity
+        out = compute_gex_velocity(self._hist([-20e6, -10e6]), net_gex=-10e6,
+                                   spot=7560.0, zero_gamma_spx=7600.0)
+        self.assertEqual(out["spot_to_flip"], -40.0)
+        self.assertIsInstance(out["velocity_m_per_min"], float)
+        self.assertIsInstance(out["samples"], int)
+        self.assertIsInstance(out["toward_flip"], bool)
+        self.assertIsInstance(out["headline"], str)
+
+
+class TestSpxRsiAlignment(unittest.TestCase):
+    """2026-06-04: SPX (^GSPC) RSI is FORWARD-FILLED onto the SPY df's bars — each bar takes the most
+    recent SPX RSI at-or-before it, so the latest bar always gets the latest SPX RSI."""
+
+    def test_ffill_maps_at_or_before(self):
+        from data_fetcher import _align_rsi_to_index
+        spx_idx = pd.date_range("2026-06-04 14:00", periods=10, freq="5min", tz="UTC")
+        spx_rsi = pd.Series([50, 51, 52, 53, 54, 55, 56, 57, 58, 59], index=spx_idx, dtype=float)
+        tgt = pd.date_range("2026-06-04 14:00:30", periods=10, freq="5min", tz="UTC")  # +30s offset
+        out = _align_rsi_to_index(spx_rsi, tgt)
+        self.assertIsNotNone(out)
+        self.assertTrue(out.notna().all())
+        self.assertEqual(out.iloc[0], 50.0)            # 14:00:30 → last SPX at-or-before = 14:00
+        self.assertEqual(out.iloc[-1], 59.0)           # latest target gets the latest SPX RSI
+        self.assertEqual(list(out.index), list(tgt))   # carries the SPY target index
+
+    def test_stale_after_last_holds_last_value(self):
+        from data_fetcher import _align_rsi_to_index
+        spx_idx = pd.date_range("2026-06-04 14:00", periods=5, freq="5min", tz="UTC")  # ...→14:20
+        spx_rsi = pd.Series([50, 51, 52, 53, 54], index=spx_idx, dtype=float)
+        tgt = pd.date_range("2026-06-04 14:30", periods=2, freq="5min", tz="UTC")      # after last
+        out = _align_rsi_to_index(spx_rsi, tgt)
+        self.assertTrue((out == 54.0).all())           # ffill holds the latest SPX value (stale, by design)
+
+    def test_target_before_first_is_nan(self):
+        from data_fetcher import _align_rsi_to_index
+        spx_idx = pd.date_range("2026-06-04 14:00", periods=5, freq="5min", tz="UTC")
+        spx_rsi = pd.Series([50, 51, 52, 53, 54], index=spx_idx, dtype=float)
+        tgt = pd.date_range("2026-06-04 13:00", periods=2, freq="5min", tz="UTC")      # before first
+        out = _align_rsi_to_index(spx_rsi, tgt)
+        self.assertTrue(out.isna().all())              # nothing at-or-before → NaN (caller keeps SPY RSI)
+
+    def test_none_input_returns_none(self):
+        from data_fetcher import _align_rsi_to_index
+        tgt = pd.date_range("2026-06-04 14:00", periods=3, freq="5min", tz="UTC")
+        self.assertIsNone(_align_rsi_to_index(None, tgt))
+
+
+class TestRthFilter(unittest.TestCase):
+    """2026-06-04: TA restricted to Regular Trading Hours so RSI/EMA/CHOP/ER track an RTH chart
+    (the SPX index you trade) rather than the SPY all-session series that smears the overnight gap."""
+
+    def _df(self):
+        idx = pd.date_range("2026-06-02 08:00", "2026-06-04 19:30", freq="5min", tz="UTC")
+        return pd.DataFrame({"Close": range(len(idx))}, index=idx)
+
+    def test_keeps_only_regular_hours(self):
+        from data_fetcher import _filter_to_rth
+        import datetime as dt
+        full = self._df()
+        out = _filter_to_rth(full, min_bars=0)
+        self.assertGreater(len(out), 0)
+        self.assertLess(len(out), len(full))           # extended-hours bars dropped
+        et = out.index.tz_convert("America/New_York")
+        self.assertTrue(all(dt.time(9, 30) <= t < dt.time(16, 0) for t in et.time))
+
+    def test_fallback_when_too_few_rth_bars(self):
+        from data_fetcher import _filter_to_rth
+        small = self._df().iloc[:5]                     # 5 pre-market bars only
+        self.assertEqual(len(_filter_to_rth(small, min_bars=50)), 5)  # too few RTH → keep full series
+
+
+class TestProposalSignalWiring(unittest.TestCase):
+    """2026-06-02: wire the under-used signals into trade proposals — RSI-50 mean-reversion
+    buffer/hazard, FADE-off de-rating, and gap-rejection penalty on the threatened side."""
+
+    REGIME = {"time_pressure": {"hours_remaining": 3.0}, "directional_bias": "NEUTRAL",
+              "regime_score": 1, "er_value": 0.2, "regime_state": "STATE A: TRENDING",
+              "momentum": {"momentum_label": "RANGEBOUND"}, "vwap_dev": 0.05}
+    GEX = {"gex_regime": "POSITIVE", "net_gex": 35e6, "put_wall_spx": 7500,
+           "call_wall_spx": 7700, "gamma_wall_spx": 7650}
+
+    def _propose(self, **over):
+        from engine import auto_propose_positions
+        kw = dict(spx_price=7600.0, regime_data=self.REGIME, smart_moat=25,
+                  day_high_spx=7620.0, day_low_spx=7560.0, range_position=50.0,
+                  existing_positions=[], gex_data=self.GEX)
+        kw.update(over)
+        return {p["strike"]: p for p in auto_propose_positions(**kw)}
+
+    def test_rsi50_buffer_beats_hazard(self):
+        from engine import analyze_trade_proposal
+        fav = analyze_trade_proposal("Put Spread", 7560, 0.50, 7600.0, self.REGIME, 30,
+                                     7620.0, 7580.0, 50.0, [], rsi_50_spx=7595)  # target above strike = buffer
+        haz = analyze_trade_proposal("Put Spread", 7560, 0.50, 7600.0, self.REGIME, 30,
+                                     7620.0, 7580.0, 50.0, [], rsi_50_spx=7555)  # target below strike = hazard
+        self.assertGreater(fav["score"], haz["score"])
+
+    def test_fade_off_lowers_scores(self):
+        on = self._propose(mean_reversion={"on": True})
+        off = self._propose(mean_reversion={"on": False})
+        common = set(on) & set(off)
+        self.assertTrue(common)
+        for k in common:
+            self.assertLess(off[k]["score"], on[k]["score"])  # FADE-off penalized
+
+    def test_gap_rejection_penalizes_threatened_side(self):
+        # BEARISH rejection → price expected to fall toward put strikes → penalize puts
+        without = self._propose(gap_rejection={"rejected": False})
+        withrej = self._propose(gap_rejection={"rejected": True, "direction": "BEARISH", "message": "x"})
+        put_common = [k for k in (set(without) & set(withrej)) if without[k]["type"] == "Put Spread"]
+        self.assertTrue(put_common)
+        for k in put_common:
+            self.assertLess(withrej[k]["score"], without[k]["score"])
+
+
 if __name__ == '__main__':
     print("\n--- RUNNING QUANT ENGINE UNIT TESTS ---\n")
     unittest.main(verbosity=2)

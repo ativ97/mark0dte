@@ -205,8 +205,10 @@ Shows where market makers have concentrated options positions:
 - **Gamma Wall**: The price level with the highest dealer gamma. SPX is magnetically attracted to this level.
 - **Put Wall**: Highest put-side gamma. Acts as a support/floor.
 - **Call Wall**: Highest call-side gamma. Acts as a resistance/ceiling.
+- **Zero-Gamma Flip** (shown in Key Levels): the SPX price where GEX switches sign — the "freezing line." SPX **below** the flip = NEGATIVE / dangerous regime; **above** it = POSITIVE / safer regime. It re-prices every poll. *Example: spot 7542, flip 7557 → price is 15 pts below the line, still dangerous but near the edge; if price reclaims the flip, the regime turns mean-reverting.*
+- **ΔGEX Velocity** (GEX panel): how fast Net GEX is changing plus a rough ETA to a sign flip — reads like "**+6.2M/min → flip ~6 min**." A **"+"** = warming toward POSITIVE / safer; a **"−"** = deepening NEGATIVE / dangerous. Use the *direction*, not the exact minute — it's a noisy heads-up gauge, and nothing is confirmed until Net GEX actually crosses zero.
 
-> **How to use**: If you sold a put spread at 5850 and the Put Wall is at 5860, dealers will likely defend 5860 → your 5850 has extra protection. If the Put Wall is at 5840 (below your strike), you have less protection.
+> **How to use the walls**: If you sold a put spread at 5850 and the Put Wall is at 5860, dealers will likely defend 5860 → your 5850 has extra protection. If the Put Wall is at 5840 (below your strike), you have less protection. **Caveat:** in a NEGATIVE GEX regime the walls are unreliable — don't count on them as protection.
 
 ### 4.7 Day P/L Dashboard
 
@@ -219,6 +221,19 @@ Shows your **running profit/loss for the entire day**:
 **Green** = profitable. **Red** = losing.
 
 > When you close a position using the ✓ button, you'll be prompted for the close price. Enter it to track accurate P/L. Leave blank to skip.
+
+> **Note:** Day P/L is now **contract-weighted** (dollars = per-share P&L × contracts × 100), so the total is correct even when your lot sizes differ.
+
+### 4.7b Tail-Day Preview (Sizing — your worst case)
+
+The single most important **sizing** readout, shown as a banner above your position cards. It answers: *if every open spread went fully against you (all the way to max loss), how bad is the damage?*
+
+- **Total max loss ($)**: the book's worst-case dollar loss.
+- **% of account**: that loss as a fraction of your account.
+- **≈ N good days**: how many average winning days one bad day would erase.
+- **Color / flags**: green → amber → red by size; flags when you're **over the amber line** (~25% of account) or **over the reference ceiling** (~50%).
+
+> **How to use**: Size so the banner stays **amber-or-better, never red.** A real edge with a fat tail still blows up if it's sized too big — this keeps any single bad day survivable. It's informational and never blocks a trade. This directly targets the #1 documented account risk: oversizing.
 
 ### 4.8 Position Summary (Iron Condor View)
 
@@ -339,6 +354,8 @@ These are informational — no immediate action required.
 | **Net GEX Regime** | GEX panel | Dealer positioning environment | NEGATIVE = dangerous |
 | **Gamma Wall** | GEX panel | Price magnet level | When SPX is near it |
 | **Put/Call Wall** | GEX panel | Support/resistance from dealers | When your strikes are near them |
+| **Zero-Gamma Flip** | Key Levels | Price where GEX flips sign (below = dangerous, above = safer) | When spot is near it / about to cross |
+| **ΔGEX Velocity** | GEX panel | Speed + direction of GEX change, ETA to a flip | A heads-up that the regime is shifting |
 
 ### Position-Specific Indicators
 
@@ -351,6 +368,7 @@ These are informational — no immediate action required.
 | **Drift alert** | Orange badge | SPX slowly moving toward strike | Subtle warning — moat is eroding |
 | **Premium trend** | Below exit strategy | Is buyback cost rising or falling? | RISING = position getting worse |
 | **Escalation level** | Badge in exit strategy | How urgent is the close signal | WARNING+ = pay attention |
+| **Tail-Day Preview** | Banner above cards | Book's worst-case $ loss / % of account / "= N good days" | ALWAYS before sizing up — keep it amber-or-better |
 
 ---
 
@@ -557,3 +575,7 @@ The same position can have completely different recommendations depending on the
 | **RSI** | Relative Strength Index — momentum oscillator. Dead zone = 45-55 (no momentum). |
 | **CHOP** | Choppiness Index — measures how "choppy" vs "trendy" price action is. > 61.8 = choppy. |
 | **ER** | Efficiency Ratio — how much of price movement is directional. < 0.20 = mostly noise. |
+| **Net GEX** | Signed sum of dealer gamma across all strikes. Negative = trending/volatile (dangerous), positive = mean-reverting (safer). |
+| **Zero-Gamma Flip** | The SPX price where net GEX crosses zero — the boundary between the positive (mean-reverting) and negative (trending) regimes. Below it = dangerous, above it = safer. |
+| **ΔGEX Velocity** | How fast net GEX is changing (millions/min) and a rough ETA to a sign flip. + = toward positive/safer, − = toward negative/dangerous. A heads-up gauge, not a trigger. |
+| **Tail-Day Preview** | The book's worst-case loss if every spread goes to max loss — in $, % of account, and "≈ N good days." A sizing gut-check; keep it amber-or-better. |

@@ -1,6 +1,41 @@
-# Implementation Progress — Phases 5-8
+# Implementation Progress
 # Read this file at the start of every new context to resume work.
-# Last updated: 2026-05-29
+# Last updated: 2026-06-03 (validation #2 + edge analysis, THEN build: 3 features — tail-day preview, contract-weighted P&L, ΔGEX velocity — + 5 reporting/display fixes + proper gamma-flip; +15 tests → 127. See method_analysis_2026-06-03.md.)
+
+## STATUS: 2026-06-03 (BUILD) — 3 priority features + 5 bug fixes SHIPPED (+15 tests → 127; engine suite + synthetic_replay GREEN in sandbox). Frontend esbuild-unverified → `npm run dev`; full stack (main import, uvicorn, npm) to confirm in the `mark` env.
+- **Sizing tail-day preview** (#1 leak): `engine.compute_tail_day_preview()` → book max-loss $ + % of account + "= N good days" + worst leg + over-warn/over-cap; `config.AVG_WIN_DAY_REFERENCE`=1300 (informational/tunable); `main` free-dict `tail_day_preview` + `TelemetryResponse` field; app.jsx banner under the heat banner. +4 tests.
+- **Contract-weighted P&L** (reporting bug): `intraday_pl` summed PER-SHARE (contract-blind) → 6/3 showed $0.95 vs real +$1,550. Added `database.ClosedPositionDB.contracts` + idempotent migration; `close_position` stores `pos.contracts`; `main` P&L now `per_share × contracts × 100`. Pre-migration closed rows default contracts=1 (historical $ understated; forward-correct).
+- **ΔGEX velocity + distance-to-zero** (GEX-flip read): `engine.compute_gex_velocity(history,…)` → least-squares net-GEX slope (M/min), trend, toward-flip + projected min-to-flip, spot-to-flip; `main._gex_history` deque(30) + free-dict `gex_velocity`; app.jsx gauge in the GEX panel. +4 tests.
+- **Proper gamma flip**: replaced cumulative-by-strike `_compute_zero_gamma` (sign-inconsistent — 6/3 bug) with `data_fetcher._compute_gamma_flip()` (net GEX recomputed vs spot) + invariant guard (spot>flip ⟺ net_gex>0, else suppress). +3 tests.
+- **Display fixes**: neg-GEX "wall protecting you" → "unreliable / no firm magnet support"; "all positions safe" + GREEN market light gated on open HIGH CLOSE recs; `regime_transition` "improving/degrading" reworded position-neutral.
+- **Analysis**: `docs/method_analysis_2026-06-03.md` (what's worked + over/underfitting discipline — freeze the core, measure out-of-sample, separate edge from size, prune don't add). **NEXT:** confirm full stack in `mark` env; watch ΔGEX live before wiring to the core gate; accumulate ~30–50 fixed-size data-era trades for expectancy + the first tail day.
+
+## STATUS: 2026-06-03 — VALIDATION SESSION #2 COMPLETE (live validation + edge analysis). Full log: docs/trading_log_2026-06-03.md.
+- **Live (Robinhood): +$1,550 realized**, 5 trade-rounds, flat by midday; $2k cap never threatened. Range-bound / mean-reverting day with deeply NEGATIVE & DEEPENING GEX (−29M→−98M); regime cycled A/B/C.
+- **★ H7 P0-2 FORCE-PATH FIRED LIVE, FIRST TIME EVER** (AM trend-through: mr=FALSE/tc=TRUE, trend_dominant 90, 7565 breached → non-downgradable CRITICAL_EJECT). The 5/13 setup appeared and the engine flagged it correctly. **STILL UNPROVEN BY OUTCOME** — user overrode ~38 min then exited green on a bounce; tail didn't materialize, so the path is proven to *fire*, not yet to *save*.
+- **Validated where exercised:** H1 (single-source), H2 (cry-wolf gate — standout), H4 (hysteresis), H5 (RED-while-profit / RSI-basis). NOT exercised: H3, H6 (no auto-proposals fired). **H8 flip vs GEX-sign = FAIL → do NOT wire flip→regime** (calc broken: null + sign-inconsistent).
+- **★ EDGE-VS-LUCK (trade history 5/11–6/2 via `edge_analysis.py`):** edge is REAL and coincides with the 5/20 data-driven switch — **discretionary era −$725 / 57% win / both blow-ups, vs data-driven era +$12,093 / 9-of-9 / no down day.** BUT the data era has had ZERO tail tests and lot size TRIPLED (10→30) over the streak → the inevitable tail day is now −$4k to −$13.5k (3–10 green days). **SIZE is the #1 lever for this account, not signal.**
+- **5 display/reporting bugs found** (detailed in trading-log EOD): contract-blind `closed_pl`/`intraday_pl`; "all positions safe" headline vs open HIGH CLOSE recs; trend-follower-centric `regime_transition` wording; broken `zero_gamma_flip`; neg-GEX "wall protecting you" false comfort.
+- **NEXT (re-prioritized post-validation):** (1) ★ **sizing prominence** — book "tail-day preview" ($ + % of account + "= N avg green days" + soft alert when today's lot > recent median); (2) fix the 5 display/reporting bugs (contract-weighted P&L FIRST — it misreports the scoreboard); (3) fix `zero_gamma_flip` (enforce spot>flip ⟺ net_gex>0), then re-evaluate wiring it; (4) confirm exit-grade #24 JUSTIFIED logic (over_limit + tc) so mean-revert-day exits aren't mis-scored; (5) **ΔGEX velocity + distance-to-zero gauge** (the GEX-flip predictor); (6) out-of-sample: log ~30-50 data-era trades at FIXED 10 lots → expectancy + capture first data-era tail day; (7) harden data layer (fetch timeouts, ET-correct GEX expiry, frontend stale-guard); (8) (gated, after #3 + data) core-gate rewire to flip/trend_dominant. **When these fixes ship, mirror the bug→pitfall notes into CLAUDE.md + .windsurfrules.**
+
+## STATUS: 2026-06-02 — wasted-signals build #1–#6 + signal-wiring SHIPPED (+18 tests → 112): magnet touch%, narrative single-source, direction/size-aware exits, hysteresis, range/RR/profit display, zero-gamma flip, and RSI-50/FADE/gap-rejection/premium-trend wired into proposals & exit nudges. **109 pass + synthetic_replay GR-PASS confirmed in the `mark` env; live payload verified (rsi_basis, zero_gamma_spx, SPX range%).** NEXT: validate the new behavior live (tomorrow) + harden the data layer. Prior 2026-06-01 below.
+
+### 2026-06-02 — live session (chat-driven, decision-GUIDE reframe) + wasted-signals build increment #1
+- **Live session:** flat → **+$1,125** on Robinhood (backtester books +$1,162.8); a positive-GEX grind-up that died into lunch chop — **P0-2 force-path STILL not exercised**. Full structured capture + EOD in `docs/trading_log_2026-06-02.md`. The 20-lot call entry into the rally (74% book DANGER) was bailed by +GEX mean-reversion — survivorship, not validation. Reframe locked: the app is a decision **GUIDE** (trades on Robinhood) → sizing stays informational, never blocks.
+- **Build increment #1** (`engine.py` + `main.py` + `test_engine.py`, +4 tests → **98**):
+  - `compute_magnet_forces` no longer overclaims: added `day_high`/`day_low` params; a predicted level **already inside today's range** (`already_touched`) or **hugging spot** (`near_spot`, `< max(8, 0.12σ)`) suppresses `touch_prob`→None and reframes the headline ("already tagged … not a fresh target") instead of the vacuous "~95% touch". New free-dict keys `touch_basis`/`already_touched` (native bool). Backward-compatible (no day range → prior behavior). Wired `day_high_spx`/`day_low_spx` into the main.py call (~L726).
+  - Fixed the inverted CAUTION moat wording (was "−2.2 pts below recommended minimum" when moat ≥ min) — sign-guarded; preserves the "below recommended" string when truly below (keeps the existing test contract).
+  - Verified via direct calls + `TestMagnetTouchProb` (4). Sandbox `python -m unittest test_engine test_positions` → 97 logic tests pass; only the `main`-import smoke test errors there (no fastapi/pandas_ta) — run the full **98** in the `mark` env.
+- **NEXT increments (ranked from the session):** (2) **narrative single-source-of-truth** (card ↔ recs ↔ exit_strategy → one verdict); (3) **direction/size-aware exit conviction** (don't CLOSE when price trends away from the strike; stop the stale day-low rec; cap the reversal-downgrade by book size); (4) **hysteresis layer** (escalation / regime_transition / trend_dominant); (5) **display cluster** (RSI feed label+staleness, range_position on SPX not SPY, RED-card-while-+profit, stale "wall protecting you", STRONG_ENTRY on thin credit); (6) **zero-gamma flip level** (top InsiderFinance gap).
+
+### 2026-06-02 (cont.) — wasted-signals build #2–#6 SHIPPED (+11 tests → 109; engine-verified)
+- **#2 narrative single-source-of-truth** (`engine.generate_market_insights`): a position with an open HIGH CLOSE rec can no longer render a GREEN "hold" card — reconciled to YELLOW "open close alert"; cards carry `close_alerts`/`close_alert_msg`. (`recommendations` already passed in at main.py.) +2 tests.
+- **#3 direction/size-aware exit conviction** (`engine.generate_recommendations` + reversal-downgrade in `evaluate_positions`): the near-miss "day high/low came within X" and "less than half the recommended moat" CLOSE recs now require GENUINE danger (warning-zone moat OR `at_risk_side`); price trending AWAY is a WATCH, not a HIGH CLOSE (kills the 6/2 winning-put cry-wolf + the stale day-low rec). The reversal-downgrade is size-capped — an over-warn leg (6/2 10-lot calls = 30%) can't be soothed eject→hold. +2 tests.
+- **#4 hysteresis**: `trend_dominant` sticky (ON ≥55 / OFF <45) via `prev_trend_dominant` (threaded through main.py `_magnet_trend_prev`); `_compute_regime_transition` widened deadband — weak ±0.2–0.5 reads collapse to "stable, leaning" instead of flipping SOFTENING/FIRMING. +3 tests.
+- **#5 display cluster**: `range_position` computed on SPX not SPY (the 6/2 100%-vs-88%); `analyze_trade_proposal` STRONG_ENTRY gated by an 8% return-on-risk floor (the $0.18 spread that scored 86 is now ACCEPTABLE); RED-card-while-profit reframed to "close to lock ~X% gain"; `rsi_basis` label field + frontend RSI caption (5-min SPY/Alpaca ≠ Robinhood). +2 tests.
+- **#6 zero-gamma flip level** (delegated): `data_fetcher._compute_zero_gamma` (interpolated cumulative signed-GEX zero crossing) → `gex_data.zero_gamma_spx/spy` (native floats) + `GexData` schema fields + surfaced as a "Zero-Gamma Flip" Key Level in main.py. +2 tests.
+- **Signal wiring (same day, +3 → 112 tests; `TestProposalSignalWiring`)**: the previously display-only signals are now decision inputs — RSI-50 mean-reversion level is a buffer/hazard factor in `analyze_trade_proposal`; `auto_propose_positions` de-rates fade proposals when FADE is OFF (strong trend) and penalizes the side a confirmed `gap_rejection` presses; a RISING buyback adds an early exit-tell to at-risk/caution legs in `evaluate_positions`. RSI-50 is now computed early in main.py to feed `auto_propose`. **Core exit-force gate (P0-2) deliberately NOT rewired to trend_dominant/flip — deferred to live validation** (the 6/2 live data showed the flip level and net-GEX sign disagreeing on regime side).
+- **Verification**: every changed engine fn exercised directly + **109 unit tests green in the sandbox** (only the `main`-import smoke test errors there — no fastapi/pandas_ta). **Run the full 109 + `synthetic_replay` + `uvicorn` in the `mark` env** to confirm live serialization. app.jsx (RSI caption) is esbuild-unverified → `npm run dev`. **NEXT:** the remaining strategic priorities — prove P0-2 on a real trend day; revive the expectancy scorecard (~50 graded trades); intraday ΔGEX + max-pain (further IF gaps).
 
 ## STATUS: 2026-06-01 — LIVE CHECKPOINT + 8 post-session fixes SHIPPED.
 First live run of the 5/29 batch (~+$1,500 realized; full session in docs/trading_log_2026-06-01.md). **H1 (P0-2 fields), H2 (sizing banner), H4 (tracker resolve) validated live. P0-2 FORCE-PATH NOT EXERCISED** — 6/1 was a chop/mean-reverting day with no trend-through, so the 5/13 fix is still UNPROVEN live (needs a genuine trend day). Shipped 8 fixes + 3 follow-on features — RSI-50 Key Level, `gex_regime_raw`, Price Magnet panel + a numpy→native serialization fix (**94 tests + synthetic_replay green**): GEX hysteresis deadband, side-aware `mean_reverting`, portfolio-heat exposure + any-RED-leg, FADE-REGIME read (`mean_reversion_status`), escalation moat-floor, EXIT-grade JUSTIFIED, + 2 display fixes (neg-GEX wall message, expected-move card likelihood). Frontend esbuild-clean (run `npm run dev` to runtime-verify the FADE REGIME badge + book-risk chip). **NEXT:** prove P0-2 on a real trend day; build the **Price-Magnet outcome-validation log** (predicted magnet/touch% vs actual close — turns the panel from heuristic into measured); tune `GEX_REGIME_BAND` from live obs; expectancy scorecard after ~50 graded trades; P1-7 GEX in backtester.
@@ -108,22 +143,27 @@ First live run of the 5/29 batch (~+$1,500 realized; full session in docs/tradin
 - [ ] **8F** Wall pressure on position cards
 
 ## KEY FILE LOCATIONS (for context reload)
-- `engine.py compute_smart_moat()` — ~line 940-1079 (7-factor smart moat)
-- `engine.py move_consumed_factor` — ~line 1018-1034
-- `engine.py evaluate_positions()` — ~line 1082-1663
-- `engine.py generate_market_insights()` — ~line 2700+ (narrative cards)
-- `engine.py auto_propose_positions()` — search for def auto_propose
-- `main.py telemetry endpoint` — GET /api/telemetry, ~line 400+
-- `main.py TelemetryResponse` — ~line 264-310
-- `data_fetcher.py fetch_spx_day_range()` — search for def fetch_spx_day_range
-- `app.jsx` — single-file React, Insights tab starts ~line 200, Evidence ~line 406
-- `data_fetcher.py _lookup_spread_direct()` — SPXW direct pricing, no conversion
-- `data_fetcher.py _lookup_spread_spy_proxy()` — SPY proxy with width_ratio scaling
-- `engine.py detect_post_event_shift()` — ~line 1340-1435
-- `main.py _buyback_history` — ~line 27-30, premium velocity ring buffer
-- `main.py velocity computation` — ~line 534-576 (after evaluate_positions)
-- `test_engine.py` — 40 tests currently passing
-- `.windsurfrules` — test count line ~28, pitfalls ~95+, version history ~108+
+# Re-derived 2026-06-02 against current engine.py (~3888 lines) / app.jsx (~2454 lines). Use as anchors, not exact.
+- `engine.py calculate_position_risk()` — ~line 23 (P0-3 sizing; wired into evaluate_positions, see below)
+- `engine.py _get_escalation_level()` — ~line 255 (moat-floor param `moat=`)
+- `engine.py compute_smart_moat()` — ~line 982 (7/8-factor smart moat)
+- `engine.py move_consumed_factor` — ~line 1105-1116
+- `engine.py stabilize_gex_regime()` — ~line 1205; `mean_reversion_status()` ~1223; `compute_rsi_50_price()` ~1258; `compute_magnet_forces()` ~1288
+- `engine.py calculate_portfolio_heat()` — ~line 1398 (total_max_loss / pct_of_account / any-RED-leg)
+- `engine.py detect_post_event_shift()` — ~line 1648
+- `engine.py evaluate_positions()` — ~line 1745 (_pos_risk wired ~2431-2462; P0-2 mean_reverting/trend_continuation gate)
+- `engine.py auto_propose_positions()` — ~line 3365
+- `engine.py generate_market_insights()` — ~line 3492 (narrative cards)
+- `main.py telemetry endpoint` — GET /api/telemetry, ~line 403-404
+- `main.py TelemetryResponse` — ~line 300; `GexData` (gex_regime_raw) ~211; `EvaluatedPosition` (contracts/position_risk/mean_reverting) ~88-99
+- `data_fetcher.py fetch_spx_day_range()` — ~line 68
+- `data_fetcher.py _lookup_spread_direct()` — ~line 912 (SPXW direct pricing, no conversion)
+- `data_fetcher.py _lookup_spread_spy_proxy()` — ~line 960 (SPY proxy with width_ratio scaling)
+- `main.py _buyback_history` — ~line 27-29, premium velocity ring buffer
+- `main.py velocity computation` — ~line 589-633 (after evaluate_positions)
+- `app.jsx` — single-file React; Key Evidence & Levels section ~line 492-498
+- `test_engine.py` — 68 tests; `test_positions.py` — 26 tests (94 total + synthetic_replay.py)
+- `.windsurfrules` — test count line ~29, pitfalls ~93+, version history ~127+
 
 ## COMPLETED ITEMS LOG
 

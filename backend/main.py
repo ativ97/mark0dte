@@ -6,6 +6,8 @@ from typing import Literal, Optional
 from collections import deque
 import datetime
 import logging
+import math
+import json
 import pandas_ta  # Registers the .ta accessor on DataFrames
 
 # Configure logging
@@ -13,8 +15,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 logger = logging.getLogger("0DTE-QuantEngine")
 
 # Import refactored modules
-from data_fetcher import fetch_alpaca_market_data, fetch_spx_live_price, fetch_spx_day_range, fetch_vix_data, compute_expected_move, fetch_gex_data, fetch_realized_move_distribution, fetch_live_option_quotes
-from engine import analyze_market_regime, evaluate_positions, generate_recommendations, compute_watch_levels, compute_position_summary, compute_smart_moat, calculate_portfolio_heat, detect_surge, compute_initial_balance, detect_gap_rejection, detect_post_event_shift, analyze_trade_proposal, clear_rec_state, auto_propose_positions, generate_market_insights, stabilize_gex_regime, mean_reversion_status, compute_rsi_50_price, compute_magnet_forces
+from data_fetcher import fetch_alpaca_market_data, fetch_spx_live_price, fetch_spx_day_range, fetch_vix_data, compute_expected_move, fetch_gex_data, fetch_realized_move_distribution, fetch_live_option_quotes, fetch_spx_intraday_bars, _align_rsi_to_index
+from config import RSI_SOURCE_SPX
+from engine import analyze_market_regime, evaluate_positions, generate_recommendations, compute_watch_levels, compute_position_summary, compute_smart_moat, calculate_portfolio_heat, detect_surge, compute_initial_balance, detect_gap_rejection, detect_post_event_shift, analyze_trade_proposal, clear_rec_state, auto_propose_positions, generate_market_insights, stabilize_gex_regime, mean_reversion_status, compute_rsi_50_price, compute_magnet_forces, compute_tail_day_preview, compute_gex_velocity
 from database import Base, engine as db_engine, get_db, PositionDB, ClosedPositionDB
 from accuracy_tracker import track_signal, resolve_position, resolve_expired_positions, clear_position_state, get_accuracy_stats, get_signal_log
 
@@ -31,8 +34,44 @@ BUYBACK_HISTORY_MAXLEN = 10
 
 # --- GEX REGIME HYSTERESIS (2026-06-01): last STRONG regime sign, for the deadband ---
 _gex_regime_prev: str | None = None
+_magnet_trend_prev: bool | None = None  # #4: trend_dominant hysteresis (prev-state for stickiness)
+_gex_history: deque = deque(maxlen=30)  # (epoch_seconds, net_gex) for the ΔGEX velocity gauge (2026-06-03)
 
-app = FastAPI(title="0DTE Quant Engine V3.0")
+class NaNSafeEncoder(json.JSONEncoder):
+    """JSON encoder that converts NaN/Inf to None instead of raising."""
+    def default(self, o):
+        return super().default(o)
+
+    def encode(self, o):
+        return super().encode(self._sanitize(o))
+
+    def _sanitize(self, obj):
+        if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
+            return None
+        if isinstance(obj, dict):
+            return {k: self._sanitize(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [self._sanitize(v) for v in obj]
+        return obj
+
+
+from fastapi.responses import JSONResponse as _JSONResponse
+
+
+class NaNSafeJSONResponse(_JSONResponse):
+    """JSONResponse subclass that uses NaN-safe encoding."""
+    def render(self, content) -> bytes:
+        return json.dumps(
+            content,
+            ensure_ascii=False,
+            allow_nan=False,
+            indent=None,
+            separators=(",", ":"),
+            cls=NaNSafeEncoder,
+        ).encode("utf-8")
+
+
+app = FastAPI(title="0DTE Quant Engine V3.0", default_response_class=NaNSafeJSONResponse)
 
 app.add_middleware(
     CORSMiddleware,
@@ -212,6 +251,8 @@ class GexData(BaseModel):
     net_gex: float = 0
     gex_regime: str = "UNAVAILABLE"
     gex_regime_raw: str | None = None  # 2026-06-01: raw sign before hysteresis (vs stabilized gex_regime)
+    zero_gamma_spx: float | None = None  # 2026-06-02: zero-gamma flip level (regime boundary), SPX
+    zero_gamma_spy: float | None = None
     gex_regime_label: str = "GEX data unavailable"
     gamma_wall_spy: float = 0
     gamma_wall_spx: float = 0
@@ -308,6 +349,7 @@ class TelemetryResponse(BaseModel):
     ema_9: float
     ema_21: float
     rsi_14: float
+    rsi_basis: str = "RSI-14 · 5-min SPY (Alpaca, real-time) — a momentum reference, NOT the SPX RSI. SPY ≠ SPX (especially on gap days); for the SPX RSI you trade, read it off your SPX chart."
     chop_value: float
     er_value: float
     vwap_dev: float
@@ -336,6 +378,8 @@ class TelemetryResponse(BaseModel):
     accuracy_stats: dict | None = None
     market_insights: MarketInsights | None = None
     portfolio_heat: dict | None = None
+    tail_day_preview: dict | None = None
+    gex_velocity: dict | None = None
     mean_reversion: dict | None = None
     rsi_50_price: float | None = None
     magnet_forces: dict | None = None
@@ -376,6 +420,7 @@ def close_position(pos_id: int, close_price: float = None, db: Session = Depends
         close_reason="manual",
         close_price=close_price,
         realized_pl=realized_pl,
+        contracts=getattr(pos, "contracts", 1) or 1,  # P&L fix (2026-06-03): dollar-weight realized_pl
     )
     db.add(closed)
     db.delete(pos)
@@ -424,6 +469,36 @@ def get_telemetry(db: Session = Depends(get_db)):
         logger.exception("Error during indicator calculations:")
         raise HTTPException(status_code=500, detail=f"Error calculating technical indicators: {str(e)}")
 
+    # 2026-06-04: compute RSI on the SPX index (^GSPC) directly so it matches the SPX chart the user
+    # trades. The SPY-proxy RSI carries pre-market bars that smear the overnight gap (read ~20 pts off
+    # SPX on the 6/4 gap day). Flag-gated + fully defensive — ANY failure keeps the SPY RSI already in
+    # df['RSI_14'], so the endpoint never breaks. spx_close_for_rsi50 carries the SPX closes to RSI-50.
+    spx_close_for_rsi50 = None
+    if RSI_SOURCE_SPX:
+        try:
+            _spx_bars = fetch_spx_intraday_bars()
+            if _spx_bars is not None and len(_spx_bars) >= 30 and "Close" in _spx_bars.columns:
+                _spx_bars = _spx_bars.copy()  # never mutate the cached frame
+                # Stitch the FRESH live ^GSPC quote onto the last bar so the current RSI tracks
+                # real-time SPX — Yahoo's intraday HISTORY lags, but the quote is fresh. Same trick
+                # the engine uses for the SPY last candle. (fetch_spx_live_price is cached → cheap.)
+                try:
+                    _spx_px, _ = fetch_spx_live_price(spy_fallback_price=live_price)
+                    if _spx_px and float(_spx_px) > 0:
+                        _spx_bars.iloc[-1, _spx_bars.columns.get_loc("Close")] = float(_spx_px)
+                except Exception as _e:
+                    logger.debug(f"SPX live-quote stitch skipped: {_e}")
+                _spx_rsi = _spx_bars.ta.rsi(length=14)
+                _aligned = _align_rsi_to_index(_spx_rsi, df.index, tolerance_min=8)
+                if _aligned is not None and _aligned.notna().sum() >= 30:
+                    df["RSI_14"] = _aligned.combine_first(df["RSI_14"])
+                    spx_close_for_rsi50 = _spx_bars["Close"]
+                    logger.info(f"RSI source = SPX (^GSPC, live-stitched): last {df['RSI_14'].iloc[-1]:.1f}")
+                else:
+                    logger.warning("SPX RSI alignment insufficient — keeping SPY-based RSI")
+        except Exception as e:
+            logger.warning(f"SPX RSI override failed → keeping SPY-based RSI: {e}")
+
     regime_data = analyze_market_regime(df)
 
     # Fetch authoritative SPX price (Yahoo ^GSPC with SPY proxy fallback)
@@ -444,7 +519,13 @@ def get_telemetry(db: Session = Depends(get_db)):
     day_low_spx = spx_range["day_low_spx"] or round(momentum_data["day_low_spy"] * spx_spy_ratio, 2)
     day_open_spx = spx_range.get("day_open_spx")
     prev_close_spx = spx_range.get("prev_close_spx")
-    range_position = momentum_data["range_position"]
+    # #5 (2026-06-02): compute range_position on SPX (the series shown), not SPY — they desync
+    # intraday (the 6/2 "100% vs ~88%" the user caught). Fall back to the SPY value if SPX range is 0.
+    _spx_rng = (day_high_spx - day_low_spx) if (day_high_spx and day_low_spx) else 0
+    if _spx_rng > 0:
+        range_position = round(max(0.0, min(100.0, (spx_price - day_low_spx) / _spx_rng * 100)), 1)
+    else:
+        range_position = momentum_data["range_position"]
     logger.info(f"SPX Day Range: High={day_high_spx}, Low={day_low_spx}, Open={day_open_spx}, PrevClose={prev_close_spx} (source: {spx_range['source']})")
 
     # Phase 6: Surge detection — rolling 20-min price change from ring buffer
@@ -556,6 +637,19 @@ def get_telemetry(db: Session = Depends(get_db)):
 
     # Portfolio-level concentration risk
     portfolio_heat = calculate_portfolio_heat(db_positions, directional_bias=regime_data["directional_bias"], evaluated_positions=evaluated_positions)
+    # Sizing prominence (2026-06-03): book-level tail-day preview ($ max loss + % account + "= N good days").
+    tail_day_preview = compute_tail_day_preview(evaluated_positions)
+
+    # ΔGEX velocity + distance-to-zero gauge (2026-06-03): the practical GEX-flip read.
+    gex_velocity = None
+    if gex_data and gex_data.get("net_gex") is not None:
+        _gex_history.append((datetime.datetime.now(datetime.timezone.utc).timestamp(), float(gex_data["net_gex"])))
+        gex_velocity = compute_gex_velocity(
+            list(_gex_history),
+            net_gex=gex_data.get("net_gex"),
+            spot=spx_price,
+            zero_gamma_spx=gex_data.get("zero_gamma_spx"),
+        )
 
     # MEAN-REVERSION REGIME read (2026-06-01): is the fade playbook (GEX-wall / RSI-fade /
     # gap-fade) valid right now, or has the regime that breaks it turned on?
@@ -655,8 +749,13 @@ def get_telemetry(db: Session = Depends(get_db)):
     # Phase 14: Intraday P/L dashboard — aggregate open + closed P/L
     today_start = datetime.datetime.now(datetime.timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     todays_closed = db.query(ClosedPositionDB).filter(ClosedPositionDB.closed_at >= today_start).all()
-    closed_pl = sum(c.realized_pl for c in todays_closed if c.realized_pl is not None)
-    open_pl = sum(p.get("estimated_pl", 0) for p in evaluated_positions)
+    # P&L bug fix (2026-06-03): realized_pl and estimated_pl are PER-SHARE; dollar P&L = per_share * contracts * 100.
+    # The old code summed per-share values (contract-blind) → understated the day total whenever lot sizes
+    # differed (6/3 showed $0.95 vs the real +$1,550). Pre-migration closed rows default contracts=1.
+    def _dollars(per_share, contracts):
+        return (per_share or 0.0) * (int(contracts) if contracts else 1) * 100.0
+    closed_pl = sum(_dollars(c.realized_pl, getattr(c, "contracts", 1)) for c in todays_closed if c.realized_pl is not None)
+    open_pl = sum(_dollars(p.get("estimated_pl", 0), p.get("contracts", 1)) for p in evaluated_positions)
     intraday_pl = {
         "closed_pl": round(closed_pl, 2),
         "open_pl": round(open_pl, 2),
@@ -664,6 +763,22 @@ def get_telemetry(db: Session = Depends(get_db)):
         "closed_count": len(todays_closed),
         "open_count": len(evaluated_positions),
     }
+
+    # RSI-50 mean-reversion target — computed early (#wire 2026-06-02) so it can feed auto_propose.
+    rsi_50_price = None
+    try:
+        # When RSI is SPX-native (^GSPC), compute RSI-50 on the SPX closes → a true SPX level (no
+        # ×ratio). Otherwise fall back to the SPY series × ratio. (2026-06-04)
+        if spx_close_for_rsi50 is not None and len(spx_close_for_rsi50) > 20:
+            _rsi50_spx = compute_rsi_50_price(spx_close_for_rsi50.tolist())
+            if _rsi50_spx is not None:
+                rsi_50_price = round(_rsi50_spx, 0)
+        if rsi_50_price is None:
+            _rsi50_spy = compute_rsi_50_price(df['Close'].tolist())
+            if _rsi50_spy is not None:
+                rsi_50_price = round(_rsi50_spy * spx_spy_ratio, 0)
+    except Exception as e:
+        logger.warning(f"RSI-50 price computation skipped: {e}")
 
     # Phase 15: Auto-propose new positions when moat allows (with live credit pricing)
     trade_proposals = auto_propose_positions(
@@ -681,6 +796,9 @@ def get_telemetry(db: Session = Depends(get_db)):
         live_quotes=live_quotes,
         quote_source=quote_source,
         spx_spy_ratio=spx_spy_ratio,
+        gap_rejection=gap_rejection,
+        mean_reversion=mean_reversion,
+        rsi_50_spx=rsi_50_price,
     )
 
     # Phase 2: Generate plain-English market insights for the Insights tab
@@ -696,35 +814,51 @@ def get_telemetry(db: Session = Depends(get_db)):
         recommendations=recommendations,
     )
 
-    # RSI-50 price (2026-06-01): the SPX level that would neutralize RSI to 50 — a MOVING
-    # mean-reversion target to bracket against the (fixed) gamma magnet. Surfaced as a Key Level.
-    rsi_50_price = None
+    # RSI-50 price surfaced as a Key Level (the value was computed early above so it could feed
+    # auto_propose; here we just attach it to the insights ladder).
     try:
-        _rsi50_spy = compute_rsi_50_price(df['Close'].tolist())
-        if _rsi50_spy is not None:
-            rsi_50_price = round(_rsi50_spy * spx_spy_ratio, 0)
-            if isinstance(market_insights, dict) and rsi_50_price:
-                _side = "below" if rsi_50_price < spx_price else "above"
-                market_insights.setdefault("key_levels", []).append({
-                    "level": rsi_50_price,
-                    "label": "RSI-50 Price (moving)",
-                    "meaning": (f"Where RSI would neutralize to 50 ({_side} spot) — a mean-reversion "
-                                f"target. Recomputes each bar; pair with the gamma wall as the two attractors."),
-                })
+        if rsi_50_price and isinstance(market_insights, dict):
+            _side = "below" if rsi_50_price < spx_price else "above"
+            market_insights.setdefault("key_levels", []).append({
+                "level": rsi_50_price,
+                "label": "RSI-50 Price (moving)",
+                "meaning": (f"Where RSI would neutralize to 50 ({_side} spot) — a mean-reversion "
+                            f"target. Recomputes each bar; pair with the gamma wall as the two attractors."),
+            })
     except Exception as e:
-        logger.warning(f"RSI-50 price computation skipped: {e}")
+        logger.warning(f"RSI-50 key-level skipped: {e}")
+
+    # Zero-gamma flip level (2026-06-02 #6): the POSITIVE/NEGATIVE regime boundary. Surface as a Key
+    # Level so it rides the existing ladder (no frontend change needed).
+    try:
+        _zg = gex_data.get("zero_gamma_spx") if isinstance(gex_data, dict) else None
+        if _zg and isinstance(market_insights, dict):
+            _zside = "above it (mean-revert side)" if spx_price >= _zg else "below it (trend/vol side)"
+            market_insights.setdefault("key_levels", []).append({
+                "level": round(_zg, 0),
+                "label": "Zero-Gamma Flip",
+                "meaning": (f"Net dealer gamma crosses zero here — the boundary between the positive "
+                            f"(mean-reverting) and negative (trending) GEX regimes. SPX is {_zside}."),
+            })
+    except Exception as e:
+        logger.warning(f"Zero-gamma key-level skipped: {e}")
 
     # Price Magnet forces (2026-06-01): which pull is strongest today (GEX wall / RSI-50 / trend)
     # + the predicted magnet level + a distribution-based touch-by-close estimate.
     magnet_forces = None
     try:
+        global _magnet_trend_prev
         magnet_forces = compute_magnet_forces(
             spx_price=spx_price, gex_data=gex_data,
             rsi_14=round(df.iloc[-1]['RSI_14'], 2),
             regime_data=regime_data, expected_move_data=expected_move_data,
             rsi_50_spx=rsi_50_price, surge_data=surge_data,
             hours_remaining=regime_data["time_pressure"]["hours_remaining"],
+            day_high=day_high_spx, day_low=day_low_spx,
+            prev_trend_dominant=_magnet_trend_prev,
         )
+        if magnet_forces is not None:
+            _magnet_trend_prev = magnet_forces.get("trend_dominant")
     except Exception as e:
         logger.warning(f"Magnet-forces computation skipped: {e}")
 
@@ -804,6 +938,8 @@ def get_telemetry(db: Session = Depends(get_db)):
         accuracy_stats=get_accuracy_stats(),
         market_insights=market_insights,
         portfolio_heat=portfolio_heat,
+        tail_day_preview=tail_day_preview,
+        gex_velocity=gex_velocity,
         mean_reversion=mean_reversion,
         rsi_50_price=rsi_50_price,
         magnet_forces=magnet_forces,
@@ -874,7 +1010,13 @@ def analyze_trade(proposal: TradeProposal, db: Session = Depends(get_db)):
     )
     day_high_spx = spx_range["day_high_spx"] or round(momentum_data["day_high_spy"] * spx_spy_ratio, 2)
     day_low_spx = spx_range["day_low_spx"] or round(momentum_data["day_low_spy"] * spx_spy_ratio, 2)
-    range_position = momentum_data["range_position"]
+    # #5 (2026-06-02): compute range_position on SPX (the series shown), not SPY — they desync
+    # intraday (the 6/2 "100% vs ~88%" the user caught). Fall back to the SPY value if SPX range is 0.
+    _spx_rng = (day_high_spx - day_low_spx) if (day_high_spx and day_low_spx) else 0
+    if _spx_rng > 0:
+        range_position = round(max(0.0, min(100.0, (spx_price - day_low_spx) / _spx_rng * 100)), 1)
+    else:
+        range_position = momentum_data["range_position"]
 
     # Fetch GEX for trade analysis
     gex_data = None

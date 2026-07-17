@@ -39,7 +39,8 @@ class ClosedPositionDB(Base):
     closed_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     close_reason = Column(String, default="manual")  # manual, eject, expired
     close_price = Column(Float, nullable=True)  # What the position was closed at
-    realized_pl = Column(Float, nullable=True)  # credit - close_price (per contract)
+    realized_pl = Column(Float, nullable=True)  # credit - close_price (PER SHARE; $ = realized_pl * contracts * 100)
+    contracts = Column(Integer, default=1)  # P&L bug fix (2026-06-03): needed to dollar-weight realized_pl
 
 
 def _ensure_schema():
@@ -51,6 +52,13 @@ def _ensure_schema():
             cols = [row[1] for row in conn.exec_driver_sql("PRAGMA table_info(positions)").fetchall()]
             if "contracts" not in cols:
                 conn.exec_driver_sql("ALTER TABLE positions ADD COLUMN contracts INTEGER DEFAULT 1")
+                conn.commit()
+            # P&L bug fix (2026-06-03): closed_positions needs contracts to dollar-weight realized_pl.
+            # NOTE: rows closed BEFORE this migration default to contracts=1, so their historical
+            # dollar P&L is understated for multi-lot trades (the lot count wasn't stored). Forward-correct.
+            ccols = [row[1] for row in conn.exec_driver_sql("PRAGMA table_info(closed_positions)").fetchall()]
+            if ccols and "contracts" not in ccols:
+                conn.exec_driver_sql("ALTER TABLE closed_positions ADD COLUMN contracts INTEGER DEFAULT 1")
                 conn.commit()
     except Exception as e:  # never block startup on a migration hiccup
         import logging

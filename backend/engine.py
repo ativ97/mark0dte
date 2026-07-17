@@ -13,7 +13,7 @@ from config import (
     STATE_A_MIN_MOAT, STATE_B_MIN_MOAT, STATE_C_MIN_MOAT,
     MARKET_CLOSE_HOUR_ET, GAMMA_ACCELERATION_HOUR_ET, FINAL_HOUR_MOAT_MULTIPLIER,
     SPREAD_WIDTH_SPX, ACCOUNT_SIZE, MAX_RISK_PER_TRADE, MAX_RISK_WARN,
-    GEX_REGIME_BAND,
+    GEX_REGIME_BAND, AVG_WIN_DAY_REFERENCE,
 )
 from data_fetcher import get_spread_buyback_price
 
@@ -828,22 +828,29 @@ def _compute_regime_transition(df: pd.DataFrame, chop_col: str, er_col: str,
         chop_trend = "FLAT"
 
     # Transition direction and confidence
+    # #4 (2026-06-02) wider deadband: only emit a directional TRANSITION on a strong 30-min move
+    # (|score_delta| > 0.5). The weak +/-0.2..0.5 tiers used to flip SOFTENING/FIRMING bar-to-bar
+    # (the 6/2 IMPROVING->DETERIORATING->FIRMING->STABLE whipsaw); collapse them to a low-confidence
+    # "stable, leaning" read so the headline direction stays steady until the move is real.
     if score_delta > 0.5:
         direction = "DETERIORATING"
-        label = "Regime degrading → chop increasing. Widen moats."
+        # Bug fix (2026-06-03): the old "degrading/improving" wording was trend-follower-centric and
+        # misled a premium-seller/fader (more chop is GOOD for them; a strengthening trend is the danger).
+        # Reword to describe the regime change + who it favors, neutrally.
+        label = "Chop building → trend weakening. Whipsaw risk up — widen moats (favors mean-reversion)."
         confidence = min(0.95, 0.5 + abs(score_delta) * 0.3)
-    elif score_delta > 0.2:
-        direction = "SOFTENING"
-        label = "Trend weakening. Monitor for State transition."
-        confidence = min(0.80, 0.4 + abs(score_delta) * 0.3)
     elif score_delta < -0.5:
         direction = "IMPROVING"
-        label = "Regime improving → trend strengthening. Tighter moats viable."
+        label = "Trend strengthening → cleaner direction. Fades/premium-sells get riskier — widen or skip counter-trend."
         confidence = min(0.95, 0.5 + abs(score_delta) * 0.3)
+    elif score_delta > 0.2:
+        direction = "STABLE"
+        label = "Stable — leaning choppier (unconfirmed)."
+        confidence = 0.4
     elif score_delta < -0.2:
-        direction = "FIRMING"
-        label = "Chop resolving. Directional signal forming."
-        confidence = min(0.80, 0.4 + abs(score_delta) * 0.3)
+        direction = "STABLE"
+        label = "Stable — leaning trendier (unconfirmed)."
+        confidence = 0.4
     else:
         direction = "STABLE"
         label = "Regime stable. No imminent transition."
@@ -1287,7 +1294,8 @@ def compute_rsi_50_price(closes, period: int = 14):
 
 def compute_magnet_forces(spx_price, gex_data=None, rsi_14=50.0, regime_data=None,
                           expected_move_data=None, rsi_50_spx=None,
-                          surge_data=None, hours_remaining=6.5):
+                          surge_data=None, hours_remaining=6.5, day_high=None, day_low=None,
+                          prev_trend_dominant=None):
     """
     Decompose the competing intraday pulls on price into comparable 0-100 strengths so the UI
     can show WHICH is dominant today and where price is favored (2026-06-01). Three forces:
@@ -1350,9 +1358,17 @@ def compute_magnet_forces(spx_price, gex_data=None, rsi_14=50.0, regime_data=Non
     pull_wall = gex_strength + (trend_strength if trend_dir == wall_dir else 0.0)
     pull_rsi = rsi_strength + (trend_strength if trend_dir == rsi_dir else 0.0)
 
-    # Trend "dominant" only when it CLEARLY exceeds both magnets (not a near-tie)
-    trend_dominant = bool(trend_strength >= 55 and trend_strength > 1.3 * gex_strength
-                          and trend_strength > 1.3 * rsi_strength)
+    # Trend "dominant" only when it CLEARLY exceeds both magnets (not a near-tie).
+    # #4 (2026-06-02) hysteresis: flip ON at >=55 (and >1.3x both magnets); once ON, stay ON until
+    # it clearly fades (<45, or no longer the top force) so it can't whipsaw on the ER~0.6 boundary
+    # (the 6/2 false->true->false flicker that toggled the FADE/trend read).
+    raw_trend_dominant = bool(trend_strength >= 55 and trend_strength > 1.3 * gex_strength
+                              and trend_strength > 1.3 * rsi_strength)
+    if prev_trend_dominant:
+        trend_dominant = bool(trend_strength >= 45 and trend_strength >= gex_strength
+                              and trend_strength >= rsi_strength)
+    else:
+        trend_dominant = raw_trend_dominant
 
     target_level, target_name = None, None
     if wall and (pull_wall >= pull_rsi or not rsi_50_spx):
@@ -1361,18 +1377,34 @@ def compute_magnet_forces(spx_price, gex_data=None, rsi_14=50.0, regime_data=Non
         target_level, target_name = int(round(rsi_50_spx)), "RSI-50 Mean"
 
     touch_prob = None
+    already_touched = False
+    near_spot = False
     if target_level and sigma > 0:
-        z = abs(target_level - spx_price) / sigma
+        dist = abs(target_level - spx_price)
+        # A level hugging spot trivially "touches" (prob saturates ~100%) — low information.
+        near_spot = dist < max(8.0, 0.12 * sigma)
+        # A level already inside today's traded range has, by definition, already been tagged.
+        if day_high is not None and day_low is not None and day_low <= target_level <= day_high:
+            already_touched = True
+        z = dist / sigma
         phi = 0.5 * (1.0 + math.erf(z / (2 ** 0.5)))
         touch_prob = int(round(max(0.0, min(1.0, 2.0 * (1.0 - phi))) * 100 / 5.0) * 5)  # nearest 5%
+
+    # Suppress a vacuous touch% (level already tagged today, or hugging spot) so the headline can't overclaim.
+    show_touch = (touch_prob is not None) and (not already_touched) and (not near_spot)
 
     if trend_dominant:
         d = "up" if trend_dir == "up" else "down" if trend_dir == "down" else "through"
         headline = (f"Trend is the dominant force ({round(trend_strength)}/100) — price likely trends "
                     f"{d} rather than pinning to a magnet. Fade setups are the weak side.")
+    elif target_level and already_touched:
+        side = "upper" if target_level >= spx_price else "lower"
+        headline = (f"Price has already tagged {target_level} ({target_name}) today — it's the {side} "
+                    f"attractor, not a fresh target. Watch whether it pins or breaks by close.")
     elif target_level:
-        tp = f" Est. ~{touch_prob}% touch by close." if touch_prob is not None else ""
-        headline = f"Price favored toward {target_level} ({target_name}).{tp}"
+        tp = f" Est. ~{touch_prob}% touch by close." if show_touch else ""
+        near = " (hugging current price — low information)" if near_spot else ""
+        headline = f"Price favored toward {target_level} ({target_name}){near}.{tp}"
     else:
         headline = "No clear magnet — mixed pulls."
 
@@ -1380,7 +1412,10 @@ def compute_magnet_forces(spx_price, gex_data=None, rsi_14=50.0, regime_data=Non
         "forces": forces,
         "predicted_magnet": "Trend" if trend_dominant else target_name,
         "predicted_level": None if trend_dominant else target_level,
-        "touch_prob": None if trend_dominant else touch_prob,
+        "touch_prob": None if (trend_dominant or not show_touch) else touch_prob,
+        "touch_basis": ("trend" if trend_dominant else "already_touched" if already_touched
+                        else "near_spot" if near_spot else "distribution" if target_level else None),
+        "already_touched": bool(already_touched),
         "trend_dominant": trend_dominant,
         "headline": headline,
         "caveat": "Heuristic pull-strengths + a distribution-based touch estimate — decision support, not a calibrated forecast.",
@@ -1393,6 +1428,157 @@ _HEAT_RANK = {"SAFE": 0, "IMBALANCED": 1, "DANGER": 2}
 def _bump_level(current: str, candidate: str) -> str:
     """Escalate a heat level, never downgrade."""
     return candidate if _HEAT_RANK.get(candidate, 0) > _HEAT_RANK.get(current, 0) else current
+
+
+def compute_tail_day_preview(evaluated_positions, account_size=None,
+                             avg_win_day_ref=None, spread_width=SPREAD_WIDTH_SPX) -> dict:
+    """
+    Book-level 'TAIL-DAY PREVIEW' (2026-06-03) — sizing prominence for the #1 documented
+    leak (oversizing). If every open leg went fully against you (all spreads to max loss),
+    what is the $ damage, the % of account, and how many average GOOD days that erases?
+    Decision SUPPORT only — never blocks (config.SIZING_HARD_BLOCK = False).
+
+    Per-leg max loss on a $width credit spread = (width - credit) * contracts * 100. Uses the
+    leg's position_risk.max_loss when present (consistent with calculate_position_risk), else
+    recomputes. `green_days_equivalent` divides by a rough, tunable AVG_WIN_DAY_REFERENCE — it
+    is a gut-check scale, NOT a fitted parameter.
+
+    Returns a native-typed dict (pitfall #25 — free-dict field): total_max_loss, pct_of_account,
+    green_days_equivalent, max_lot, over_warn, over_cap, worst_leg, headline.
+    """
+    account_size = ACCOUNT_SIZE if account_size is None else account_size
+    avg_win_day_ref = AVG_WIN_DAY_REFERENCE if avg_win_day_ref is None else avg_win_day_ref
+    legs = evaluated_positions or []
+    if not legs:
+        return {"total_max_loss": 0.0, "pct_of_account": 0.0, "green_days_equivalent": 0.0,
+                "max_lot": 0, "over_warn": False, "over_cap": False, "worst_leg": None,
+                "headline": "No open positions — no tail-day exposure."}
+
+    total = 0.0
+    max_lot = 0
+    worst = None
+    worst_ml = -1.0
+    for p in legs:
+        try:
+            contracts = int(p.get("contracts", 1) or 1)
+        except (TypeError, ValueError):
+            contracts = 1
+        max_lot = max(max_lot, contracts)
+        pr = p.get("position_risk") or {}
+        ml = pr.get("max_loss")
+        if ml is None:
+            credit = float(p.get("credit", 0.0) or 0.0)
+            ml = max(0.0, spread_width - credit) * contracts * 100.0
+        ml = float(ml)
+        total += ml
+        if ml > worst_ml:
+            worst_ml = ml
+            worst = {"id": int(p.get("id", 0)), "type": str(p.get("type", "")),
+                     "strike": float(p.get("strike", 0.0)), "contracts": contracts,
+                     "max_loss": float(round(ml, 0))}
+
+    pct = (total / account_size * 100.0) if account_size else 0.0
+    green_days = (total / avg_win_day_ref) if avg_win_day_ref else 0.0
+    over_warn = bool(total > MAX_RISK_WARN)
+    over_cap = bool(total > MAX_RISK_PER_TRADE)
+
+    headline = (f"If this book goes fully against you: ${total:,.0f} "
+                f"({pct:.0f}% of account ≈ {green_days:.1f} good days at ~${avg_win_day_ref:,.0f}/day).")
+    if over_cap:
+        headline += " Past your reference ceiling — one tail day erases multiple good days."
+    elif over_warn:
+        headline += " Above your amber size line."
+
+    return {
+        "total_max_loss": float(round(total, 0)),
+        "pct_of_account": float(round(pct, 1)),
+        "green_days_equivalent": float(round(green_days, 1)),
+        "max_lot": int(max_lot),
+        "over_warn": over_warn,
+        "over_cap": over_cap,
+        "worst_leg": worst,
+        "headline": headline,
+    }
+
+
+def compute_gex_velocity(history, net_gex=None, spot=None, zero_gamma_spx=None,
+                         flat_band_per_min=500_000.0) -> dict:
+    """
+    ΔGEX velocity + distance-to-zero gauge (2026-06-03) — the practical GEX-flip read the
+    user asked for. `history` is a list of (epoch_seconds, net_gex) oldest→newest. Computes:
+      - velocity (least-squares slope of net GEX over the recent window, in raw units & M/min),
+      - trend RISING / FALLING / FLAT (deadband = flat_band_per_min),
+      - whether net GEX is heading TOWARD a sign flip (slope opposes the current sign),
+      - a naive projected minutes-to-flip if the rate holds, and
+      - spot's signed distance to the zero-gamma level (when provided).
+
+    Heuristic decision support: net GEX is noisy and the time-to-flip is a linear extrapolation,
+    NOT a forecast. Native-typed dict (pitfall #25). <2 samples → a 'warming up' read.
+    """
+    samples = []
+    for item in (history or []):
+        try:
+            t = float(item[0]); g = float(item[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        samples.append((t, g))
+
+    cur = float(net_gex) if net_gex is not None else (samples[-1][1] if samples else 0.0)
+    out = {
+        "net_gex": float(cur),
+        "velocity_per_min": 0.0,
+        "velocity_m_per_min": 0.0,
+        "trend": "FLAT",
+        "samples": int(len(samples)),
+        "toward_flip": False,
+        "projected_min_to_flip": None,
+        "spot_to_flip": None,
+        "headline": "GEX velocity warming up — need more samples.",
+    }
+    if spot is not None and zero_gamma_spx:
+        out["spot_to_flip"] = float(round(float(spot) - float(zero_gamma_spx), 0))
+
+    if len(samples) < 2:
+        return out
+
+    win = samples[-12:]
+    t0 = win[0][0]
+    xs = [(t - t0) / 60.0 for t, _ in win]  # minutes since window start
+    ys = [g for _, g in win]
+    n = len(win)
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    denom = sum((x - mx) ** 2 for x in xs)
+    slope = (sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / denom) if denom > 0 else 0.0
+
+    out["velocity_per_min"] = float(round(slope, 1))
+    out["velocity_m_per_min"] = float(round(slope / 1e6, 2))
+    if slope > flat_band_per_min:
+        out["trend"] = "RISING"
+    elif slope < -flat_band_per_min:
+        out["trend"] = "FALLING"
+    else:
+        out["trend"] = "FLAT"
+
+    toward = (cur < 0 and slope > 0) or (cur > 0 and slope < 0)
+    out["toward_flip"] = bool(toward and out["trend"] != "FLAT")
+    if out["toward_flip"] and abs(slope) > 0:
+        out["projected_min_to_flip"] = float(round(abs(cur) / abs(slope), 1))
+
+    cur_m = cur / 1e6
+    vel_m = abs(slope) / 1e6
+    sign = "positive" if cur > 0 else "negative"
+    if out["trend"] == "FLAT":
+        out["headline"] = f"Net GEX {cur_m:+.0f}M, roughly flat — {sign} regime steady."
+    elif out["toward_flip"] and out["projected_min_to_flip"] is not None:
+        tgt = "positive" if cur < 0 else "negative"
+        out["headline"] = (f"Net GEX {cur_m:+.0f}M, {out['trend'].lower()} ~{vel_m:.1f}M/min — "
+                           f"heading toward a {tgt} flip (~{out['projected_min_to_flip']:.0f} min if it holds).")
+    else:
+        deepen = "deepening" if cur < 0 else "building"
+        out["headline"] = (f"Net GEX {cur_m:+.0f}M, {out['trend'].lower()} ~{vel_m:.1f}M/min — "
+                           f"{deepen} {sign}, no flip imminent.")
+    return out
 
 
 def calculate_portfolio_heat(db_positions, directional_bias: str = "NEUTRAL",
@@ -1987,7 +2173,10 @@ def evaluate_positions(db_positions, spx_price: float, db_session,
             elif effective_zone == "CAUTION":
                 # --- CAUTION: Above warning zone but below recommended moat ---
                 deficit = round(effective_moat_min - moat, 1)
-                message = f"CAUTION: Moat {deficit} pts below recommended minimum ({effective_moat_min} pts)."
+                if deficit > 0:
+                    message = f"CAUTION: Moat {round(moat, 1)} pts — {deficit} pts below recommended minimum ({effective_moat_min} pts)."
+                else:
+                    message = f"CAUTION: Moat {round(moat, 1)} pts — at/above recommended minimum ({effective_moat_min} pts); flagged for proximity/regime."
                 if range_risk:
                     message += f" SPX near day {'low' if near_day_low else 'high'} — pressing toward strike."
                 if at_risk_side and not range_risk:
@@ -2141,6 +2330,12 @@ def evaluate_positions(db_positions, spx_price: float, db_session,
 
         # ---- PREMIUM HISTORY ----
         premium_trend = _update_premium_history(pos.id, estimated_buyback)
+
+        # #wire (2026-06-02): a RISING buyback (premium moving AGAINST you) on an at-risk or
+        # caution/warning leg is an early adverse tell — surface it on the message. Informational
+        # ONLY: it does not change the action or escalation.
+        if premium_trend == "RISING" and (at_risk_side or effective_zone in ("CAUTION", "WARNING")):
+            message += " Premium RISING (moving against you) — early exit tell."
 
         # ---- BREAKEVEN TOUCH DETECTION ----
         breakeven_event = _update_breakeven_state(pos.id, pos.credit, estimated_buyback, estimated_pl)
@@ -2394,11 +2589,16 @@ def evaluate_positions(db_positions, spx_price: float, db_session,
         # Downgrade aggressive CLOSE signals to HOLD_WITH_TRIGGER -- but ONLY in a
         # mean-reverting (positive-GEX) regime. In a trend-continuation regime the
         # downgrade is exactly the 5/13 trap, so it is suppressed.
+        # #3 (2026-06-02) size cap: never soften an eject->hold on an oversized leg — a leg already
+        # at/over the per-trade warn cap (the 6/2 10-lot calls = 30% each) shouldn't be soothed to "hold".
+        _dg_contracts = getattr(pos, "contracts", 1) or 1
+        _dg_oversized = calculate_position_risk(_dg_contracts, SPREAD_WIDTH_SPX, pos.credit).get("warn_limit", False)
         if (mean_reverting
                 and reversal_score >= 50
                 and moat > GAMMA_TRAP_THRESHOLD
                 and exit_strategy["action"] in ("CLOSE_SOON", "CLOSE_NOW")
-                and moat <= WARNING_ZONE_THRESHOLD):
+                and moat <= WARNING_ZONE_THRESHOLD
+                and not _dg_oversized):
             original_action = exit_strategy["action"]
             exit_strategy["action"] = "HOLD_WITH_TRIGGER"
             reversal_note = ", ".join(reversal_reasons[:3])
@@ -2565,16 +2765,32 @@ def generate_recommendations(evaluated_positions: list, spx_price: float,
             })
         elif pos["type"] == "Call Spread" and (strike - day_high_spx) < 15:
             gap = round(strike - day_high_spx, 1)
-            # Only HIGH if position is actually in danger; MEDIUM if moat is healthy
-            if moat < effective_moat_min:
+            # #3 (2026-06-02) direction/danger-aware: a HIGH CLOSE fires only on GENUINE danger
+            # (warning-zone moat OR price pressing this side). Below the ideal buffer but with price
+            # trending AWAY is WATCH, not cry-wolf. Lead with CURRENT moat, not the stale day extreme
+            # (the 6/2 "day high came within X" rec that fired while price was 40 pts clear).
+            at_risk = pos.get("at_risk_side", False)
+            genuine_danger = (moat <= WARNING_ZONE_THRESHOLD) or at_risk
+            if moat < effective_moat_min and genuine_danger:
                 near_miss_priority = "MEDIUM" if final_30_min else ("HIGH" if not final_hour else "MEDIUM")
                 recs.append({
                     "priority": near_miss_priority,
                     "category": "CLOSE" if near_miss_priority == "HIGH" else "WATCH",
                     "target_id": pos["id"],
                     "message": (
-                        f"Call {strike}: Day high ({day_high_spx:.0f}) came within {gap} pts of strike. "
-                        f"{'Final 30 min — theta favors hold.' if final_30_min else f'Insufficient buffer for State {state_label} volatility.'}"
+                        f"Call {strike}: {moat:.0f} pts moat and price is pressing the call side"
+                        f"{' (warning zone)' if moat <= WARNING_ZONE_THRESHOLD else ''}. "
+                        f"{'Final 30 min — theta favors hold.' if final_30_min else f'Thin buffer for State {state_label} volatility.'}"
+                    ),
+                })
+            elif moat < effective_moat_min:
+                recs.append({
+                    "priority": "LOW",
+                    "category": "WATCH",
+                    "target_id": pos["id"],
+                    "message": (
+                        f"Call {strike}: {moat:.0f} pts moat (below the {effective_moat_min:.0f}-pt ideal) "
+                        f"but price is trending away from the call side — monitor, not urgent."
                     ),
                 })
             else:
@@ -2583,8 +2799,7 @@ def generate_recommendations(evaluated_positions: list, spx_price: float,
                     "category": "WATCH",
                     "target_id": pos["id"],
                     "message": (
-                        f"Call {strike}: Day high ({day_high_spx:.0f}) reached within {gap} pts of strike. "
-                        f"Currently safe ({moat:.0f} pts moat). Watch for re-test."
+                        f"Call {strike}: safe ({moat:.0f} pts moat); day high came within {gap} pts earlier. Watch for re-test."
                     ),
                 })
 
@@ -2624,15 +2839,29 @@ def generate_recommendations(evaluated_positions: list, spx_price: float,
             })
         elif pos["type"] == "Put Spread" and (day_low_spx - strike) < 15:
             gap = round(day_low_spx - strike, 1)
-            if moat < effective_moat_min:
+            # #3 (2026-06-02) direction/danger-aware (see Call-side note above).
+            at_risk = pos.get("at_risk_side", False)
+            genuine_danger = (moat <= WARNING_ZONE_THRESHOLD) or at_risk
+            if moat < effective_moat_min and genuine_danger:
                 near_miss_priority = "MEDIUM" if final_30_min else ("HIGH" if not final_hour else "MEDIUM")
                 recs.append({
                     "priority": near_miss_priority,
                     "category": "CLOSE" if near_miss_priority == "HIGH" else "WATCH",
                     "target_id": pos["id"],
                     "message": (
-                        f"Put {strike}: Day low ({day_low_spx:.0f}) came within {gap} pts of strike. "
-                        f"{'Final 30 min — theta favors hold.' if final_30_min else f'Insufficient buffer for State {state_label} volatility.'}"
+                        f"Put {strike}: {moat:.0f} pts moat and price is pressing the put side"
+                        f"{' (warning zone)' if moat <= WARNING_ZONE_THRESHOLD else ''}. "
+                        f"{'Final 30 min — theta favors hold.' if final_30_min else f'Thin buffer for State {state_label} volatility.'}"
+                    ),
+                })
+            elif moat < effective_moat_min:
+                recs.append({
+                    "priority": "LOW",
+                    "category": "WATCH",
+                    "target_id": pos["id"],
+                    "message": (
+                        f"Put {strike}: {moat:.0f} pts moat (below the {effective_moat_min:.0f}-pt ideal) "
+                        f"but price is trending away from the put side — monitor, not urgent."
                     ),
                 })
             else:
@@ -2641,8 +2870,7 @@ def generate_recommendations(evaluated_positions: list, spx_price: float,
                     "category": "WATCH",
                     "target_id": pos["id"],
                     "message": (
-                        f"Put {strike}: Day low ({day_low_spx:.0f}) reached within {gap} pts of strike. "
-                        f"Currently safe ({moat:.0f} pts moat). Watch for re-test."
+                        f"Put {strike}: safe ({moat:.0f} pts moat); day low came within {gap} pts earlier. Watch for re-test."
                     ),
                 })
 
@@ -2652,16 +2880,26 @@ def generate_recommendations(evaluated_positions: list, spx_price: float,
     for pos in evaluated_positions:
         moat = pos["moat"]
         if moat > WARNING_ZONE_THRESHOLD and moat < effective_moat_min * 0.5:
-            moat_deficit_priority = "MEDIUM" if final_30_min else "HIGH"
+            # #3 (2026-06-02) direction-aware: "below half the ideal moat" is only CLOSE-worthy if
+            # price is actually PRESSING this side. If price is trending away, this is the cry-wolf
+            # that fired on the 6/2 winning put — downgrade to an informational WATCH.
+            at_risk = pos.get("at_risk_side", False)
+            if at_risk and not final_30_min:
+                moat_deficit_priority = "HIGH"
+            elif at_risk:
+                moat_deficit_priority = "MEDIUM"
+            else:
+                moat_deficit_priority = "LOW"
             moat_deficit_suffix = " Final 30 min — theta decay may save this position." if final_30_min else ""
+            side_note = ("price is pressing this side — high probability of entering the warning zone"
+                         if at_risk else "but price is trending away — informational")
             recs.append({
                 "priority": moat_deficit_priority,
                 "category": "CLOSE" if moat_deficit_priority == "HIGH" else "WATCH",
                 "target_id": pos["id"],
                 "message": (
                     f"{pos['type']} {pos['strike']}: Moat ({moat} pts) is less than half "
-                    f"the recommended minimum ({effective_moat_min} pts). "
-                    f"High probability of entering warning zone on any move.{moat_deficit_suffix}"
+                    f"the recommended minimum ({effective_moat_min} pts) — {side_note}.{moat_deficit_suffix}"
                 ),
             })
 
@@ -3111,6 +3349,7 @@ def analyze_trade_proposal(
     momentum_label: str = "",
     vwap_dev: float = 0.0,
     gex_data: dict = None,
+    rsi_50_spx: float = None,
 ) -> dict:
     """
     Scores a proposed credit spread BEFORE entry.
@@ -3295,8 +3534,29 @@ def analyze_trade_proposal(
             gex_score -= 3
             reasons_against.append("Negative GEX — trending/volatile, dealers short gamma.")
 
+    # ---- RSI-50 MEAN-REVERSION TARGET (2026-06-02 wire) ----
+    # The moving price that neutralizes RSI to 50 is where mean-reversion pulls. It's a BUFFER when it
+    # sits between spot and the short strike (pull is away from the strike), a HAZARD when it's beyond
+    # the strike (pull is toward it). Small factor — it's a tiebreaker, not a primary driver.
+    rsi50_score = 0
+    if rsi_50_spx:
+        if trade_type == "Put Spread":
+            if rsi_50_spx > strike:
+                rsi50_score = 5
+                reasons_for.append(f"RSI-50 target ({rsi_50_spx:.0f}) sits above your put strike — mean-reversion pulls price away.")
+            else:
+                rsi50_score = -5
+                reasons_against.append(f"RSI-50 target ({rsi_50_spx:.0f}) is at/below your put strike — mean-reversion pulls toward it.")
+        else:
+            if rsi_50_spx < strike:
+                rsi50_score = 5
+                reasons_for.append(f"RSI-50 target ({rsi_50_spx:.0f}) sits below your call strike — mean-reversion pulls price away.")
+            else:
+                rsi50_score = -5
+                reasons_against.append(f"RSI-50 target ({rsi_50_spx:.0f}) is at/above your call strike — mean-reversion pulls toward it.")
+
     # ---- TOTAL SCORE ----
-    raw_score = moat_score + range_score + direction_score + time_score + credit_score + portfolio_score + max(0, gex_score)
+    raw_score = moat_score + range_score + direction_score + time_score + credit_score + portfolio_score + max(0, gex_score) + rsi50_score
     penalties = regime_penalty + range_stress_penalty + abs(min(0, gex_score))
     total_score = max(0, min(100, raw_score - penalties))
 
@@ -3317,6 +3577,15 @@ def analyze_trade_proposal(
         verdict = "REJECT"
         verdict_label = "Reject — Do Not Enter"
         verdict_color = "red"
+
+    # #5 (2026-06-02) return-on-risk floor: a thin-credit spread can't be STRONG_ENTRY no matter how
+    # good the moat — a "strong" entry must pay for its risk (6/2: a $0.18 spread scored STRONG_ENTRY).
+    _rr = credit / max(0.01, SPREAD_WIDTH_SPX - credit)
+    if verdict == "STRONG_ENTRY" and _rr < 0.08:
+        verdict, verdict_label, verdict_color = "ACCEPTABLE", "Acceptable", "blue"
+        reasons_against.append(
+            f"Return-on-risk only {_rr * 100:.0f}% (${credit:.2f} credit vs ${SPREAD_WIDTH_SPX - credit:.2f} risk) — thin for a 'strong' entry."
+        )
 
     # ---- SUGGESTED ALTERNATIVE ----
     suggested_strike = None
@@ -3377,6 +3646,9 @@ def auto_propose_positions(
     live_quotes: dict = None,
     quote_source: str = "SPY",
     spx_spy_ratio: float = 10.0,
+    gap_rejection: dict = None,
+    mean_reversion: dict = None,
+    rsi_50_spx: float = None,
 ) -> list:
     """
     Auto-proposes new credit spread candidates using analyze_trade_proposal.
@@ -3448,6 +3720,7 @@ def auto_propose_positions(
                     momentum_label=momentum_label,
                     vwap_dev=vwap_dev,
                     gex_data=gex_data,
+                    rsi_50_spx=rsi_50_spx,
                 )
 
                 # Phase 6I: Penalize fade trades during TREND_SURGE
@@ -3460,7 +3733,16 @@ def auto_propose_positions(
                         fm = surge_data.get("fade_multiplier", 0.0)
                         surge_penalty = round(15 * fm)  # up to -15 pts
 
-                adjusted_score = result["score"] - surge_penalty
+                # #wire (2026-06-02): penalize fading a confirmed gap rejection, and de-rate
+                # mean-reversion (credit-spread) proposals when the FADE playbook is OFF (strong trend).
+                gap_penalty = 0
+                if gap_rejection and gap_rejection.get("rejected"):
+                    gdir = gap_rejection.get("direction")
+                    if (gdir == "BEARISH" and side == "Put Spread") or (gdir == "BULLISH" and side == "Call Spread"):
+                        gap_penalty = 12
+                fade_penalty = 8 if (mean_reversion is not None and mean_reversion.get("on") is False) else 0
+
+                adjusted_score = result["score"] - surge_penalty - gap_penalty - fade_penalty
                 if result["verdict"] in ("STRONG_ENTRY", "ACCEPTABLE") and adjusted_score > 40:
                     proposal = {
                         "type": side,
@@ -3475,6 +3757,10 @@ def auto_propose_positions(
                     }
                     if surge_penalty > 0:
                         proposal["reasons_against"] = [f"TREND_SURGE: fading {surge_dir} (-{surge_penalty}pts)"] + proposal["reasons_against"]
+                    if gap_penalty > 0:
+                        proposal["reasons_against"] = [f"Gap rejection {gap_rejection.get('direction')} pressing this side (-{gap_penalty}pts)"] + proposal["reasons_against"]
+                    if fade_penalty > 0:
+                        proposal["reasons_against"] = [f"FADE regime OFF (strong trend) — mean-reversion entries weaker (-{fade_penalty}pts)"] + proposal["reasons_against"]
                     proposals.append(proposal)
             except Exception as e:
                 logger.warning(f"Auto-propose failed for {side} @ {strike}: {e}")
@@ -3540,6 +3826,15 @@ def generate_market_insights(
             market_light = "GREEN"
             market_headline = "Market has a clean trend"
 
+    # #2b narrative single-source (2026-06-03): a GREEN "all clear" market read must not coexist with
+    # an open HIGH CLOSE rec on a position (the 6/3 "all positions safe" headline shown over a leg the
+    # engine was flagging to close). Compute it once; gate the light AND the story sentence below.
+    any_high_close = any(r.get("category") == "CLOSE" and r.get("priority") == "HIGH"
+                         for r in (recommendations or []))
+    if market_light == "GREEN" and any_high_close:
+        market_light = "YELLOW"
+        market_headline += " — but a position is flagged to close"
+
     # Override to RED if time pressure is extreme
     if hours < 0.5:
         market_light = "RED" if any(p.get("moat", 999) < SAFE_ZONE_THRESHOLD for p in evaluated_positions) else market_light
@@ -3578,7 +3873,12 @@ def generate_market_insights(
         elif warning_count > 0:
             story_parts.append(f"{warning_count} position{'s' if warning_count > 1 else ''} in warning zone — monitor closely.")
         elif safe_count == len(evaluated_positions):
-            story_parts.append("All positions are safe. Let theta do the work.")
+            if any_high_close:
+                # #2b (2026-06-03): don't say "all safe" while a leg is flagged to close — that
+                # contradicts the open HIGH CLOSE rec (often a sizing / at-risk-side call, not moat).
+                story_parts.append("Positions look safe on moat, but at least one is flagged to close — review the alerts.")
+            else:
+                story_parts.append("All positions are safe. Let theta do the work.")
 
     # Sentence 3: Key context (GEX, time, RSI)
     context_parts = []
@@ -3615,6 +3915,13 @@ def generate_market_insights(
         profit_pct = ((credit - est_buyback) / credit * 100) if credit > 0 else 0
         exit_action = pos.get("exit_strategy", {}).get("action", "HOLD")
         reversal = pos.get("reversal_score", 0)
+
+        # #2 (2026-06-02) single-source-of-truth: the card must reflect open CLOSE recs for THIS
+        # position, so a GREEN "hold" can't coexist with a HIGH CLOSE alert (the 6/2 contradiction
+        # that misled on both the put and the calls).
+        pos_close_recs = [r for r in (recommendations or [])
+                          if r.get("target_id") == pos.get("id") and r.get("category") == "CLOSE"]
+        has_high_close = any(r.get("priority") == "HIGH" for r in pos_close_recs)
 
         # Determine traffic light
         if moat <= GAMMA_TRAP_THRESHOLD:
@@ -3665,6 +3972,20 @@ def generate_market_insights(
         elif profit_pct >= 80 and hours < 2:
             action = f"Take profit at ~${est_buyback:.2f}"
 
+        # #2: an open HIGH CLOSE alert can't sit under a GREEN "hold" card — reconcile to one verdict.
+        if has_high_close and light == "GREEN":
+            light = "YELLOW"
+            verdict = "Open close alert — review recommendations"
+            if action == "Hold" or action.startswith("Hold"):
+                action = "Review close alert"
+
+        # #5 (2026-06-02): a RED card that's still net-profitable should read "lock the gain", not
+        # alarm — the escalation is proximity-based, but closing here still banks a profit.
+        if light == "RED" and profit_pct >= 25:
+            verdict = f"Close to lock ~{profit_pct:.0f}% gain — strike near but still profitable"
+            if action.startswith("Close") or action.startswith("Hold"):
+                action = f"Close to lock ~{profit_pct:.0f}% gain"
+
         # Context: what needs to happen for danger
         day_range = round(day_high_spx - day_low_spx, 0) if day_high_spx and day_low_spx else 0
         direction = "rise" if pos["type"] == "Call Spread" else "drop"
@@ -3702,6 +4023,10 @@ def generate_market_insights(
             strike = pos["strike"]
             is_put = pos["type"] == "Put Spread"
 
+            # Bug fix (2026-06-03): in NEGATIVE GEX the walls are unreliable / no magnet support (the
+            # position message already says so) — claiming a wall is "protecting you" is false comfort.
+            # Qualify the wall-protection language when dealers are short gamma.
+            neg_gex = gex_data.get("gex_regime") == "NEGATIVE"
             # Find the most relevant wall for this position type
             if is_put:
                 # Put spreads care about put wall (support) and gamma wall
@@ -3710,7 +4035,11 @@ def generate_market_insights(
                 wall_dist = round(strike - relevant_wall, 0) if relevant_wall else 0
                 if relevant_wall > 0:
                     if relevant_wall >= strike:
-                        gex_proximity = f"{wall_label} {relevant_wall:.0f} is ABOVE your strike — protecting you"
+                        gex_proximity = (
+                            f"{wall_label} {relevant_wall:.0f} is above your strike, but negative GEX makes walls unreliable — no firm magnet support"
+                            if neg_gex else
+                            f"{wall_label} {relevant_wall:.0f} is ABOVE your strike — protecting you"
+                        )
                     else:
                         gex_proximity = f"{wall_label} {relevant_wall:.0f}: {abs(wall_dist):.0f} pts below your strike"
             else:
@@ -3720,7 +4049,11 @@ def generate_market_insights(
                 wall_dist = round(relevant_wall - strike, 0) if relevant_wall else 0
                 if relevant_wall > 0:
                     if relevant_wall <= strike:
-                        gex_proximity = f"{wall_label} {relevant_wall:.0f} is BELOW your strike — protecting you"
+                        gex_proximity = (
+                            f"{wall_label} {relevant_wall:.0f} is below your strike, but negative GEX makes walls unreliable — no firm magnet support"
+                            if neg_gex else
+                            f"{wall_label} {relevant_wall:.0f} is BELOW your strike — protecting you"
+                        )
                     else:
                         gex_proximity = f"{wall_label} {relevant_wall:.0f}: {abs(wall_dist):.0f} pts above your strike"
 
@@ -3739,6 +4072,8 @@ def generate_market_insights(
             "heat_score": _compute_heat_score(pos, regime_data, gex_data),
             "context": context,
             "gex_proximity": gex_proximity,
+            "close_alerts": len(pos_close_recs),
+            "close_alert_msg": (pos_close_recs[0]["message"] if pos_close_recs else None),
         })
 
     # ---- KEY LEVELS ----
